@@ -92,6 +92,37 @@
           </div>
 
           <div class="field-group">
+            <div class="group-title">性格</div>
+            <div class="group-hint">决定它说话的语气和长短。保存后下一条消息生效。</div>
+
+            <div class="field">
+              <span>语气</span>
+              <div class="persona-row" id="persona-presets"></div>
+            </div>
+
+            <div class="field">
+              <span>回复长度</span>
+              <div class="persona-row" id="persona-lengths"></div>
+            </div>
+
+            <label class="switch-row">
+              <span>允许 emoji</span>
+              <input type="checkbox" id="persona-emoji" />
+              <span class="switch"></span>
+            </label>
+
+            <label class="field">
+              <span>自称</span>
+              <input type="text" id="persona-name" placeholder="比格多栋" />
+            </label>
+
+            <label class="field">
+              <span>额外要求</span>
+              <textarea id="persona-signature" rows="2" placeholder="比如：每句话结尾加「汪」"></textarea>
+            </label>
+          </div>
+
+          <div class="field-group">
             <div class="group-title">行为</div>
             <label class="switch-row">
               <span>开机自动启动</span>
@@ -104,8 +135,12 @@
               <span class="switch"></span>
             </label>
             <label class="field">
-              <span>唤起快捷键</span>
-              <input type="text" id="shortcut" placeholder="Control+Shift+Space" />
+              <span>对话快捷键</span>
+              <input type="text" id="shortcut" placeholder="Alt+W" />
+            </label>
+            <label class="field">
+              <span>显隐桌宠快捷键</span>
+              <input type="text" id="pet-shortcut" placeholder="Alt+Q" />
             </label>
           </div>
 

@@ -421,6 +421,52 @@ body {
 .field input:focus {
   border-color: rgba(217, 160, 91, 0.5);
 }
+.field textarea {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 12.5px;
+  font-family: inherit;
+  outline: none;
+  resize: none;
+  line-height: 1.55;
+  transition: border-color 0.15s;
+}
+.field textarea:focus {
+  border-color: rgba(217, 160, 91, 0.5);
+}
+
+/* 性格选项 */
+.persona-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.persona-opt {
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    border-color 0.15s,
+    background 0.15s;
+}
+.persona-opt:hover {
+  color: var(--text);
+  border-color: rgba(217, 160, 91, 0.35);
+}
+.persona-opt.on {
+  background: rgba(217, 160, 91, 0.16);
+  border-color: rgba(217, 160, 91, 0.55);
+  color: var(--accent);
+}
 
 .switch-row {
   display: flex;

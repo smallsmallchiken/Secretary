@@ -146,6 +146,46 @@ document.getElementById('btn-close').addEventListener('click', () => window.bubb
 
 /* ---------------- 设置 ---------------- */
 
+// 与 src/core/persona.js 的 PRESETS / LENGTHS 保持一致
+const PERSONA_PRESETS = ['黏人', '利落', '损友', '元气'];
+const PERSONA_LENGTHS = [
+  { key: 'short', label: '很短' },
+  { key: 'normal', label: '适中' },
+  { key: 'detailed', label: '可长一点' }
+];
+
+let personaState = { preset: '黏人', length: 'short', custom: '' };
+
+function renderPersonaOptions() {
+  const pbox = document.getElementById('persona-presets');
+  pbox.innerHTML = '';
+  for (const key of PERSONA_PRESETS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'persona-opt' + (personaState.preset === key ? ' on' : '');
+    b.textContent = key;
+    b.addEventListener('click', () => {
+      personaState.preset = key;
+      renderPersonaOptions();
+    });
+    pbox.appendChild(b);
+  }
+
+  const lbox = document.getElementById('persona-lengths');
+  lbox.innerHTML = '';
+  for (const item of PERSONA_LENGTHS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'persona-opt' + (personaState.length === item.key ? ' on' : '');
+    b.textContent = item.label;
+    b.addEventListener('click', () => {
+      personaState.length = item.key;
+      renderPersonaOptions();
+    });
+    lbox.appendChild(b);
+  }
+}
+
 async function loadSettings() {
   const cfg = await window.bubbleAPI.getConfig();
   document.getElementById('llm-enabled').checked = !!(cfg.llm && cfg.llm.enabled);
@@ -155,6 +195,21 @@ async function loadSettings() {
   document.getElementById('auto-launch').checked = !!cfg.autoLaunch;
   document.getElementById('auto-idle').checked = !!(cfg.behavior && cfg.behavior.autoIdle);
   document.getElementById('shortcut').value = (cfg.shortcuts && cfg.shortcuts.toggle) || '';
+  const petShortcut = document.getElementById('pet-shortcut');
+  if (petShortcut) {
+    petShortcut.value = (cfg.shortcuts && cfg.shortcuts.petToggle) || '';
+  }
+
+  const p = cfg.persona || {};
+  personaState = {
+    preset: p.preset || '黏人',
+    length: p.length || 'short',
+    custom: p.custom || ''
+  };
+  renderPersonaOptions();
+  document.getElementById('persona-emoji').checked = !!p.emoji;
+  document.getElementById('persona-name').value = p.name || '';
+  document.getElementById('persona-signature').value = p.signature || '';
 
   await loadReminders();
 
@@ -209,7 +264,21 @@ document.getElementById('btn-save').addEventListener('click', async () => {
     },
     autoLaunch: document.getElementById('auto-launch').checked,
     behavior: { autoIdle: document.getElementById('auto-idle').checked },
-    shortcuts: { toggle: document.getElementById('shortcut').value.trim() || 'Control+Shift+Space' }
+    shortcuts: {
+      toggle: document.getElementById('shortcut').value.trim() || 'Alt+W',
+      petToggle:
+        (document.getElementById('pet-shortcut') &&
+          document.getElementById('pet-shortcut').value.trim()) ||
+        'Alt+Q'
+    },
+    persona: {
+      preset: personaState.preset,
+      length: personaState.length,
+      emoji: document.getElementById('persona-emoji').checked,
+      name: document.getElementById('persona-name').value.trim() || '比格多栋',
+      signature: document.getElementById('persona-signature').value.trim(),
+      custom: personaState.custom
+    }
   };
 
   await window.bubbleAPI.setConfig(patch);

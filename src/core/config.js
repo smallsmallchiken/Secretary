@@ -32,9 +32,27 @@ const DEFAULT_CONFIG = {
     allowWander: true
   },
   shortcuts: {
-    toggle: 'Control+Shift+Space'
+    // 和桌宠对话
+    toggle: 'Alt+W',
+    // 显示 / 隐藏桌宠（不退出进程）
+    petToggle: 'Alt+Q'
   },
   autoLaunch: false,
+  // 性格与回复格式
+  persona: {
+    // 预设：黏人 / 利落 / 损友 / 元气
+    preset: '黏人',
+    // 回复长度：short / normal / detailed
+    length: 'short',
+    // 是否允许 emoji（气泡是纯文本渲染）
+    emoji: false,
+    // 桌宠自称
+    name: '比格多栋',
+    // 非空时覆盖预设的性格描述，完全自定义
+    custom: '',
+    // 额外的补充要求，比如口头禅
+    signature: ''
+  },
   // 常用应用别名，用户可自行补充
   appAliases: {}
 };
@@ -104,9 +122,12 @@ function getAll() {
   return load();
 }
 
-/** 模型配置的语义化读取，避免各处手写 'llm' 字符串 */
+/** 模型配置。允许用环境变量 PET_LLM_API_KEY 覆盖 Key，避免明文写进配置文件 */
 function getLLM() {
-  return get('llm', {});
+  const llm = { ...get('llm', {}) };
+  const envKey = process.env.PET_LLM_API_KEY;
+  if (envKey) llm.apiKey = envKey;
+  return llm;
 }
 
 module.exports = { get, set, getAll, getLLM, save, DEFAULT_CONFIG };

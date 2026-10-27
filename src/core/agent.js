@@ -3,6 +3,7 @@
 const config = require('./config');
 const llm = require('./llm');
 const tools = require('./tools');
+const persona = require('./persona');
 const { dbg } = require('./debug');
 
 /* ------------------------------------------------------------------ */
@@ -263,12 +264,18 @@ async function runLLM(text) {
   history.push({ role: 'user', content: text });
   if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
 
-  const messages = [{ role: 'system', content: llm.SYSTEM_PROMPT }, ...history];
+  const personaCfg = persona.build(config.get('persona', {}));
+  const messages = [{ role: 'system', content: personaCfg.systemPrompt }, ...history];
   const sideEffects = [];
-  dbg('[llm] 发起请求 model=', cfg.model, 'baseUrl=', cfg.baseUrl, '历史=', history.length);
+  dbg(
+    '[llm] 发起请求 model=', cfg.model,
+    '| 性格=', personaCfg.preset, '/', personaCfg.length,
+    '| 温度=', personaCfg.temperature,
+    '| 历史=', history.length
+  );
 
   for (let round = 0; round < 4; round++) {
-    const msg = await llm.chat({ messages, config: cfg });
+    const msg = await llm.chat({ messages, config: cfg, temperature: personaCfg.temperature });
     messages.push(msg);
     dbg(
       '[llm] 第', round + 1, '轮返回: tool_calls=',
