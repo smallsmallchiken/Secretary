@@ -181,8 +181,13 @@ function matchLocal(raw) {
   if (/^(锁屏|锁屏幕|锁定屏幕|锁一下)/.test(text)) return { tool: 'lock_screen', args: {} };
 
   // 搜索
-  const searchMatch = text.match(/^(?:帮我)?(?:搜索|搜一下|搜|百度|查一下|查查|查)\s*(.+)$/);
-  if (searchMatch) return { tool: 'web_search', args: { query: searchMatch[1].trim() } };
+  // 必须用 (.*) 而不是 (.+)：(.+) 会迫使正则回溯到更短的关键词，
+  // 于是「搜索」被拆成 搜 + 索、「查一下」被拆成 查 + 一下，把半截关键词当成查询词
+  const searchMatch = text.match(/^(?:帮我)?(?:搜索|搜一下|搜|百度一下|百度|查一下|查查|查)\s*(.*)$/);
+  if (searchMatch) {
+    const query = searchMatch[1].trim().replace(/^一下\s*/, '').trim();
+    if (query) return { tool: 'web_search', args: { query } };
+  }
 
   // 打开网址
   const urlMatch = text.match(/(https?:\/\/[^\s]+)/);
@@ -205,7 +210,7 @@ function matchLocal(raw) {
     }
   }
   // 直接说应用名
-  if (/^(网易云音乐?|微信|qq|钉钉|飞书|企业微信)$/i.test(compact)) {
+  if (/^(网易云音乐?|网易云|微信|qq|钉钉|飞书|企业微信)$/i.test(compact)) {
     return { tool: 'open_app', args: { app_name: compact } };
   }
 

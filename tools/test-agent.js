@@ -96,6 +96,18 @@ const RULE_CASES = [
   ['截图', 'take_screenshot', {}],
   ['锁屏', 'lock_screen', {}],
   ['搜索 显卡驱动怎么更新', 'web_search', { query: '显卡驱动怎么更新' }],
+  // 只说了命令词、没有查询内容 → 不该命中（曾经会被正则回溯拆成 搜 + 索）
+  ['搜索', null, null],
+  ['搜一下', null, null],
+  ['查一下', null, null],
+  ['查查', null, null],
+  ['百度一下', null, null],
+  // 关键词后面跟「一下」再跟内容 → 查询词不该带上半截关键词
+  ['搜索天气', 'web_search', { query: '天气' }],
+  ['搜索一下天气', 'web_search', { query: '天气' }],
+  ['查一下天气', 'web_search', { query: '天气' }],
+  ['百度一下天气', 'web_search', { query: '天气' }],
+  ['网易云', 'open_app', { app_name: '网易云' }],
   ['我的提醒', 'list_reminders', {}],
   ['取消提醒 喝水', 'cancel_reminder', { text: '喝水' }],
   ['清空所有提醒', 'cancel_reminder', { all: true }],
@@ -269,6 +281,17 @@ async function runChecks() {
       config.getLLM = origGetLLM;
       llm.chat = origChat;
     }
+
+    /* ---- 第 5 组：PowerShell 字符串转义 ---- */
+    console.log('\n[5] PowerShell 转义');
+    const apps = require(path.join(ROOT, 'src/core/tools/apps.js'));
+    const hostile = "a';calc;'";
+    const quoted = apps.psQuote(hostile);
+    check(
+      'psQuote 把单引号成对转义（应用名带 \' 不能逃出 PS 字符串）',
+      quoted === "a'';calc;''" && !quoted.replace(/''/g, '').includes("'"),
+      JSON.stringify(quoted)
+    );
   } finally {
     // 无论成败都还原提醒队列
     if (reminderSnapshot == null) {

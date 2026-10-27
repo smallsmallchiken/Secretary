@@ -133,9 +133,14 @@ function regQueryDefault(key) {
   });
 }
 
+/** PowerShell 单引号字符串里，' 必须写成 ''，否则带单引号的应用名能逃出字符串执行任意命令 */
+function psQuote(s) {
+  return String(s).replace(/'/g, "''");
+}
+
 /** reg.exe 不可用时的兜底（有些环境会把它列进安全黑名单） */
 async function psQueryDefault(key) {
-  const psPath = key.replace(/^HKCU\\/, 'HKCU:\\').replace(/^HKLM\\/, 'HKLM:\\');
+  const psPath = psQuote(key.replace(/^HKCU\\/, 'HKCU:\\').replace(/^HKLM\\/, 'HKLM:\\'));
   try {
     const out = await runPowerShell(
       `try { (Get-ItemProperty -Path '${psPath}' -ErrorAction Stop).'(default)' } catch { '' }`,
@@ -188,7 +193,7 @@ async function findByRunKey(exeName) {
   const script = [
     "$p = Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -ErrorAction SilentlyContinue",
     "if ($p) {",
-    `  ($p.PSObject.Properties | Where-Object { $_.Value -like '*${exeName}*' } | Select-Object -First 1).Value`,
+    `  ($p.PSObject.Properties | Where-Object { $_.Value -like '*${psQuote(exeName)}*' } | Select-Object -First 1).Value`,
     '}'
   ].join('\n');
   try {
@@ -363,4 +368,4 @@ async function openApp(rawName, extraAliases = {}) {
   }
 }
 
-module.exports = { openApp, PRESETS, ALIASES, findByPaths, findByRegistry, expandEnv };
+module.exports = { openApp, PRESETS, ALIASES, findByPaths, findByRegistry, expandEnv, psQuote };
