@@ -176,6 +176,19 @@ let moved = false;
 let startX = 0;
 let startY = 0;
 
+function endDrag() {
+  if (!isDragging) return;
+  isDragging = false;
+  stage.classList.remove('dragging');
+  window.petAPI.dragEnd();
+
+  if (!moved) {
+    window.petAPI.click();
+    if (!roaming) setState('happy', { force: true });
+  }
+  scheduleAutoBehavior();
+}
+
 stage.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
   isDragging = true;
@@ -190,6 +203,12 @@ stage.addEventListener('mousedown', (e) => {
 
 window.addEventListener('mousemove', (e) => {
   if (!isDragging) return;
+  // 鼠标在窗口外松开时收不到 mouseup：回到窗口里一发现按键已经抬起就补一次收尾，
+  // 否则拖动状态一直挂着（桌宠停在按下态，主进程的 __dragging 也一直是 true）
+  if (e.buttons === 0) {
+    endDrag();
+    return;
+  }
   if (Math.abs(e.screenX - startX) > 4 || Math.abs(e.screenY - startY) > 4) {
     moved = true;
   }
@@ -197,16 +216,8 @@ window.addEventListener('mousemove', (e) => {
 });
 
 window.addEventListener('mouseup', (e) => {
-  if (!isDragging || e.button !== 0) return;
-  isDragging = false;
-  stage.classList.remove('dragging');
-  window.petAPI.dragEnd();
-
-  if (!moved) {
-    window.petAPI.click();
-    if (!roaming) setState('happy', { force: true });
-  }
-  scheduleAutoBehavior();
+  if (e.button !== 0) return;
+  endDrag();
 });
 
 // 右键菜单
