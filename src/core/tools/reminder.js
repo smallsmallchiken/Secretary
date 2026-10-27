@@ -35,10 +35,23 @@ function writeAll(list) {
   fs.writeFileSync(resolvePath(), JSON.stringify(list, null, 2), 'utf8');
 }
 
+const MAX_DELAY = 2147483647; // Node setTimeout 上限，约 24.8 天
+
 function schedule(item) {
+  const existing = timers.get(item.id);
+  if (existing) clearTimeout(existing);
+  timers.delete(item.id);
+
   const delay = new Date(item.at).getTime() - Date.now();
-  if (delay <= 0) return;
-  const timer = setTimeout(() => fire(item.id), delay);
+  if (delay <= 0) {
+    fire(item.id);
+    return;
+  }
+  // 超过上限就分段等待，到点前再确认一次，避免被截断成立即触发
+  const timer = setTimeout(() => {
+    if (new Date(item.at).getTime() - Date.now() > 1000) schedule(item);
+    else fire(item.id);
+  }, Math.min(delay, MAX_DELAY));
   timers.set(item.id, timer);
 }
 
@@ -124,11 +137,28 @@ function cancel(id) {
   return { ok: true, message: `已取消提醒：${item.text}` };
 }
 
+function cancelByText(text) {
+  const key = String(text || '').trim();
+  if (!key) throw new Error('要取消哪条提醒？');
+  const list = readAll();
+  const hits = list.filter((x) => String(x.text).includes(key));
+  if (!hits.length) throw new Error(`没有找到包含「${key}」的提醒`);
+  for (const item of hits) {
+    if (timers.has(item.id)) {
+      clearTimeout(timers.get(item.id));
+      timers.delete(item.id);
+    }
+  }
+  writeAll(list.filter((x) => !hits.some((h) => h.id === x.id)));
+  return { ok: true, message: `已取消 ${hits.length} 条提醒：${hits.map((h) => h.text).join('、')}` };
+}
+
 function clearAll() {
+  const n = readAll().length;
   for (const t of timers.values()) clearTimeout(t);
   timers.clear();
   writeAll([]);
-  return { ok: true, message: '已清空所有提醒' };
+  return { ok: true, message: `已清空 ${n} 条提醒` };
 }
 
-module.exports = { init, add, list, cancel, clearAll, formatWhen };
+module.exports = { init, add, list, cancel, cancelByText, clearAll, formatWhen };

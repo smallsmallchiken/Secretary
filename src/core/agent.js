@@ -88,15 +88,29 @@ function parseWhen(input, base = new Date()) {
 /* 本地规则引擎（不需要 API Key）                                       */
 /* ------------------------------------------------------------------ */
 
+// 音频相关名词：只有出现它们才认为是"调音量"，避免"打开高德地图"被当成调大音量
+const AUDIO_NOUN = '(音量|声音|喇叭|音响|扬声器)';
+
+const VOLUME_UP_RE = new RegExp(
+  `${AUDIO_NOUN}[^，。！？]{0,4}(大|高|升|加|放大|增大|提高|开大)` +
+    `|(调大|加大|放大|增大|提高|调高|开大|升高)[^，。！？]{0,4}${AUDIO_NOUN}` +
+    `|^(大声|响一点|响点)`
+);
+const VOLUME_DOWN_RE = new RegExp(
+  `${AUDIO_NOUN}[^，。！？]{0,4}(小|低|降|减|放小|减小|降低|关小)` +
+    `|(调小|减小|放小|降低|调低|关小|关低|压低)[^，。！？]{0,4}${AUDIO_NOUN}` +
+    `|^(小声|轻一点|轻点)`
+);
+
+// 顺序很重要：越具体的意图越靠前，否则「播放下一首」会被 ^播放 吃掉
 const MEDIA_PATTERNS = [
-  [/^(暂停|停一下|暂停播放|pause)/i, 'toggle'],
-  [/^(播放|继续|继续播放|放歌|开始播放)/, 'toggle'],
-  [/下一首|下一曲|切歌|换一首|next/, 'next'],
-  [/上一首|上一曲|前一首|prev/, 'prev'],
-  [/静音|取消静音|mute/, 'mute'],
-  [/(音量)?(调)?(大|高)(一点|点|一些)?|声音大/, 'volume_up'],
-  [/(音量)?(调)?(小|低)(一点|点|一些)?|声音小/, 'volume_down'],
-  [/停止播放|关掉音乐|stop/, 'stop']
+  [/下一首|下一曲|切歌|换一首|^next$/i, 'next'],
+  [/上一首|上一曲|前一首|^prev$|^previous$/i, 'prev'],
+  [/停止播放|关掉音乐|^stop$/i, 'stop'],
+  [/^(静音|取消静音|静音一下|mute)(一下)?$/i, 'mute'],
+  [VOLUME_UP_RE, 'volume_up'],
+  [VOLUME_DOWN_RE, 'volume_down'],
+  [/^(播放|继续|继续播放|开始播放|放歌|放音乐|暂停|停一下|暂停播放|pause)(一下|吧|呗)?$/i, 'toggle']
 ];
 
 function matchLocal(raw) {
@@ -131,8 +145,18 @@ function matchLocal(raw) {
   if (/我的提醒|有什么提醒|提醒列表|待办/.test(text)) {
     return { tool: 'list_reminders', args: {} };
   }
-  if (/取消(所有)?提醒|清空提醒/.test(text)) {
-    return { tool: 'cancel_reminder', args: {} };
+  // 带内容的取消：取消提醒 喝水
+  const cancelMatch = text.match(/^(?:帮我)?取消提醒\s*(.+)$/);
+  if (cancelMatch) {
+    return { tool: 'cancel_reminder', args: { text: cancelMatch[1].trim() } };
+  }
+  // 只有明确说"所有/全部/清空"才清空
+  if (/^(?:帮我)?(?:取消(?:所有|全部)提醒|清空(?:所有|全部)?提醒)$/.test(text.trim())) {
+    return { tool: 'cancel_reminder', args: { all: true } };
+  }
+  // 光说"取消提醒"含义不明，问清楚，别直接清空
+  if (/^(?:帮我)?取消提醒$|^清空提醒$/.test(text.trim())) {
+    return { tool: 'cancel_reminder', args: {}, _needTarget: true };
   }
 
   // 微信 / QQ 回复草稿
@@ -173,7 +197,7 @@ function matchLocal(raw) {
   // 打开应用
   const openMatch = text.match(/^(?:帮我)?(?:打开|启动|运行|开启|开一下|开个|开)\s*(.{1,30}?)(?:吧|呗|呀|啊)?$/);
   if (openMatch) {
-    let appName = openMatch[1].trim().replace(/[，。！？]$/, '');
+    let appName = openMatch[1].trim().replace(/[，,。！？!?；;].*$/, '').trim();
     appName = appName.replace(/^(一下|下|个)\s*/, '');
     if (appName && !/文件|文件夹|网页|浏览器$this/.test(appName)) {
       return { tool: 'open_app', args: { app_name: appName } };
@@ -192,23 +216,52 @@ function matchLocal(raw) {
 /* ------------------------------------------------------------------ */
 
 function llmReady() {
-  const cfg = config.get('llm');
+  const cfg = config.getLLM();
   return !!(cfg && cfg.enabled && cfg.apiKey);
 }
 
 // 出现这些信号说明是复合/复杂意图，本地规则单条匹配会吃掉一半语义，应该交给模型
-const COMPLEX_HINT = /然后|再(帮|把|去|说|看)|并且|顺便|同时|先.{0,8}再|以及|之后/;
+const COMPLEX_HINT = /然后|再(帮|把|去|说|看)|并且|顺便|同时|先.{0,8}再|以及|之后|还要/;
 
-function isComplex(text) {
-  return text.length > 14 || COMPLEX_HINT.test(text);
+// 多意图信号、本地没命中、或者本地命中了但句子很长（多半夹带了别的意思）→ 交给模型
+function isComplex(text, local) {
+  if (COMPLEX_HINT.test(text)) return true;
+  if (!local) return true;
+  return text.length > 20;
 }
 
 let history = [];
+const HISTORY_LIMIT = 20;
+
+function remember(userText, assistantText) {
+  if (!assistantText) return;
+  history.push({ role: 'user', content: String(userText) });
+  history.push({ role: 'assistant', content: String(assistantText) });
+  if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
+}
+
+/** 只润色、不带工具：避免"润色"请求被模型当成干活请求 */
+async function polishText(content) {
+  const cfg = config.getLLM();
+  const msg = await llm.chat({
+    messages: [
+      {
+        role: 'system',
+        content: '你是中文文案润色助手。把用户给的话改写成一条可以直接发给对方的中文回复，只输出正文，不要解释、不要引号、不要 Markdown。'
+      },
+      { role: 'user', content: String(content) }
+    ],
+    config: cfg,
+    allowTools: false,
+    temperature: 0.5
+  });
+  return String(msg.content || '').replace(/^["“]|["”]$/g, '').trim();
+}
 
 async function runLLM(text) {
-  const cfg = config.get('llm');
+  const cfg = config.getLLM();
   history.push({ role: 'user', content: text });
-  if (history.length > 16) history = history.slice(-16);
+  if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
 
   const messages = [{ role: 'system', content: llm.SYSTEM_PROMPT }, ...history];
   const sideEffects = [];
@@ -226,7 +279,15 @@ async function runLLM(text) {
     if (!msg.tool_calls || !msg.tool_calls.length) {
       const content = (msg.content || '').trim() || '……';
       history.push({ role: 'assistant', content });
-      if (history.length > 16) history = history.slice(-16);
+      if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
+      if (sideEffects.length) {
+        const brief = sideEffects
+          .slice(0, 4)
+          .map((s) => `${s.tool}:${String(s.message || '').slice(0, 60)}`)
+          .join('；');
+        history.push({ role: 'assistant', content: `[已执行] ${brief}` });
+        if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
+      }
       return { type: 'text', message: content, sideEffects };
     }
 
@@ -241,9 +302,11 @@ async function runLLM(text) {
       let result;
       try {
         if (call.function.name === 'set_reminder' && args.at) {
-          // 模型可能给的是相对说法，兜底解析一次
-          const parsed = parseWhen(String(args.at));
-          if (parsed) args.at = parsed.toISOString();
+          // 模型给的通常是完整 ISO；只有解析不出有效时间时才用本地中文解析兜底
+          if (Number.isNaN(new Date(String(args.at)).getTime())) {
+            const parsed = parseWhen(String(args.at));
+            if (parsed) args.at = parsed.toISOString();
+          }
         }
         result = await tools.execute(call.function.name, args);
         sideEffects.push({ tool: call.function.name, ...result });
@@ -260,6 +323,14 @@ async function runLLM(text) {
     }
   }
 
+  if (sideEffects.length) {
+    const brief = sideEffects
+      .slice(0, 4)
+      .map((s) => `${s.tool}:${String(s.message || '').slice(0, 60)}`)
+      .join('；');
+    history.push({ role: 'assistant', content: `[已执行] ${brief}` });
+    if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
+  }
   return { type: 'text', message: '这个我想太久了，换个说法试试？', sideEffects };
 }
 
@@ -307,7 +378,7 @@ async function handle(rawInput) {
 
   const local = matchLocal(text);
   // 配了模型时，复杂说法交给模型编排；简单单条指令仍走本地，快且省 token
-  const preferLLM = llmReady() && isComplex(text);
+  const preferLLM = llmReady() && isComplex(text, local);
   dbg(
     '[agent] 输入：', text,
     '| 本地命中：', local ? local.tool : '无',
@@ -317,15 +388,26 @@ async function handle(rawInput) {
 
   // 提醒但没说时间
   if (local && local._missingTime) {
-    return { type: 'text', message: `好的，要提醒你「${local.args.text}」。什么时候提醒？比如「下午3点」或「半小时后」。` };
+    const res = { type: 'text', message: `好的，要提醒你「${local.args.text}」。什么时候提醒？比如「下午3点」或「半小时后」。` };
+    remember(text, res.message);
+    return res;
+  }
+
+  if (local && local._needTarget) {
+    const res = { type: 'text', message: '要取消哪一条？可以说「取消提醒 喝水」，或者明确说「清空所有提醒」。' };
+    remember(text, res.message);
+    return res;
   }
 
   // 微信草稿：如果配置了模型，让它把话写得更自然
   if (local && local.tool === 'wechat_draft' && llmReady() && !preferLLM) {
     try {
-      const res = await runLLM(`请把这句话润色成一条可以直接发给对方的中文回复，只输出回复正文，不要任何解释：${local.args.content}`);
-      const polished = res.message.replace(/^["“]|["”]$/g, '').trim();
-      const result = await tools.execute('wechat_draft', { content: polished, target: local.args.target });
+      const polished = await polishText(local.args.content);
+      const result = await tools.execute('wechat_draft', {
+        content: polished || local.args.content,
+        target: local.args.target
+      });
+      remember(text, result.message);
       return { type: 'action', tool: 'wechat_draft', ...result };
     } catch {
       // 润色失败就退回原话
@@ -335,6 +417,7 @@ async function handle(rawInput) {
   if (local && !preferLLM) {
     try {
       const result = await tools.execute(local.tool, local.args);
+      remember(text, result.message);
       return { type: 'action', tool: local.tool, ...result };
     } catch (err) {
       return { type: 'error', message: friendlyError(err) };
@@ -349,6 +432,7 @@ async function handle(rawInput) {
       if (local && local.tool) {
         try {
           const result = await tools.execute(local.tool, local.args);
+          remember(text, result.message);
           return { type: 'action', tool: local.tool, ...result };
         } catch {
           /* 落到下面的错误提示 */
@@ -361,6 +445,7 @@ async function handle(rawInput) {
   if (local) {
     try {
       const result = await tools.execute(local.tool, local.args);
+      remember(text, result.message);
       return { type: 'action', tool: local.tool, ...result };
     } catch (err) {
       return { type: 'error', message: friendlyError(err) };
@@ -374,4 +459,4 @@ function resetHistory() {
   history = [];
 }
 
-module.exports = { handle, parseWhen, matchLocal, llmReady, resetHistory, cnToNum };
+module.exports = { handle, parseWhen, matchLocal, llmReady, resetHistory, cnToNum, polishText, isComplex };

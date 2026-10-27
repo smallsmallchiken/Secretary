@@ -104,4 +104,9 @@ function getAll() {
   return load();
 }
 
-module.exports = { get, set, getAll, save, DEFAULT_CONFIG };
+/** 模型配置的语义化读取，避免各处手写 'llm' 字符串 */
+function getLLM() {
+  return get('llm', {});
+}
+
+module.exports = { get, set, getAll, getLLM, save, DEFAULT_CONFIG };

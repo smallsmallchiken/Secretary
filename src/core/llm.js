@@ -25,17 +25,19 @@ const SYSTEM_PROMPT = `你是「比格多栋」，一只住在用户 Windows 桌
 - 如果用户只是聊天或问问题，就正常回答，不要瞎调工具。
 - 涉及微信时，明确告诉用户文案已复制、需要他自己粘贴发送。`;
 
-async function chat({ messages, config, temperature = 0.3 }) {
+async function chat({ messages, config, temperature = 0.3, allowTools = true }) {
   const baseUrl = (config.baseUrl || 'https://api.deepseek.com').replace(/\/+$/, '');
   const url = baseUrl.endsWith('/v1') ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
 
   const body = {
     model: config.model || 'deepseek-chat',
     messages,
-    temperature,
-    tools: tools.toOpenAITools(),
-    tool_choice: 'auto'
+    temperature
   };
+  if (allowTools) {
+    body.tools = tools.toOpenAITools();
+    body.tool_choice = 'auto';
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60000);
