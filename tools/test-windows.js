@@ -66,6 +66,50 @@ check('超上限被夹到 2.0', b3.width, Math.round(base.width * (2.0 / 0.85)))
 
 windows.applyPetScale(0.85); // 还原，避免影响后续断言
 
+console.log('\n贴头气泡定位：');
+// 只验「结构对不对」，不断言具体像素偏移：云朵/句号/尾巴的锚点常量是
+// windows.js 和 bubble.css 两边共用的，改样式就会变，写死在测试里只会
+// 让每次调 UI 都红一片。真正要防的回归是：挂错边、压到桌宠、跑出屏幕、
+// 高度不夹取、设置态尺寸不对、顶边不翻面。
+// 替身工作区 1920x1040，dockPosition 把桌宠放右下角（右半边）→ 气泡应挂左侧
+windows.showBubble(); // 确保气泡窗口已创建（chat 态）
+windows.setBubbleMode('chat');
+windows.resizeBubbleChat(200);
+windows.positionBubble();
+
+const lay = windows.getBubbleLayout();
+const pet = windows.getPetWindow(); // 窗口对象，供下面挪位置用
+const petBox = pet.getBounds(); // 停靠位快照
+const bub = windows.getBubbleWindow().getBounds();
+
+check('气泡挂宠物左侧（桌宠在工作区右半边）', lay && lay.side, 'left');
+check('气泡整体在脑袋上方（往上长，不盖住桌宠身体）', bub.y + bub.height <= petBox.y + petBox.height, true);
+check('气泡不越出工作区左沿', bub.x >= 0, true);
+check('气泡不越出工作区右沿', bub.x + bub.width <= 1920, true);
+check('气泡与宠物不重叠', bub.x + bub.width <= petBox.x, true);
+check('气泡不越出工作区上下沿', bub.y >= 0 && bub.y + bub.height <= 1040, true);
+
+const hMin = windows.resizeBubbleChat(5);
+check('高度夹取下限 BUBBLE_CHAT_MIN_H', hMin.height, 96);
+const hMax = windows.resizeBubbleChat(9999);
+check('高度夹取上限 BUBBLE_CHAT_MAX_H', hMax.height, 380);
+const hMid = windows.resizeBubbleChat(200);
+check('高度按渲染回传值', hMid.height, 200);
+
+// 桌宠被拖到屏幕顶边时，上方放不下 → 翻到脑袋下方（below 标记给渲染器翻尾巴）
+pet.setPosition(petBox.x, 0);
+windows.resizeBubbleChat(200);
+const layTop = windows.getBubbleLayout();
+check('顶边时翻到脑袋下方', layTop && layTop.below, true);
+check('below 态气泡仍留在工作区内', layTop.y >= 0 && layTop.y + 200 <= 1040, true);
+pet.setPosition(petBox.x, petBox.y); // 还原 dockPosition 的停靠位
+
+windows.setBubbleMode('settings');
+const bubSettings = windows.getBubbleWindow().getBounds();
+check('设置态窗口尺寸 400x560', `${bubSettings.width}x${bubSettings.height}`, '400x560');
+check('设置态不越出工作区', bubSettings.y >= 0 && bubSettings.y + bubSettings.height <= 1040, true);
+windows.setBubbleMode('chat'); // 还原，避免影响后续断言
+
 console.log('\n自绘菜单：');
 const items = [
   { id: 'chat', label: '说点什么…', hint: 'Alt+W' },
