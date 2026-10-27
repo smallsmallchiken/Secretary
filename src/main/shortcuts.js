@@ -52,6 +52,29 @@ function registerShortcuts() {
     bind('Control+Shift+Space', () => windows.showBubble(), '对话(备用)');
   }
 
+  // 缩放：Alt+↑ 放大，Alt+↓ 缩小
+  const upAccel = config.get('shortcuts.scaleUp', 'Alt+Up');
+  const downAccel = config.get('shortcuts.scaleDown', 'Alt+Down');
+  const STEP = 1.12;
+
+  bind(
+    upAccel,
+    () => {
+      const res = windows.stepPetScale(STEP);
+      if (!res.changed) dbg(`[scale] 已经是最大 ${res.scale}`);
+    },
+    '放大桌宠'
+  );
+
+  bind(
+    downAccel,
+    () => {
+      const res = windows.stepPetScale(1 / STEP);
+      if (!res.changed) dbg(`[scale] 已经是最小 ${res.scale}`);
+    },
+    '缩小桌宠'
+  );
+
   // 老功能的快捷入口
   bind(
     'Control+Shift+P',

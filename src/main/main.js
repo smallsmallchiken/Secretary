@@ -12,6 +12,14 @@ const { createTray, refreshTray } = require('./tray');
 const { registerShortcuts, unregisterShortcuts } = require('./shortcuts');
 const { dbg } = require('../core/debug');
 
+// 兜住未捕获异常，否则主进程会静默退出，什么线索都不留
+process.on('uncaughtException', (err) => {
+  dbg('[fatal] 未捕获异常：', (err && err.stack) || String(err));
+});
+process.on('unhandledRejection', (reason) => {
+  dbg('[fatal] 未处理的 Promise 拒绝：', String((reason && reason.stack) || reason));
+});
+
 // 透明窗口 + canvas 2D 用不着 GPU，关掉硬件加速能避开不少显卡驱动的坑
 app.disableHardwareAcceleration();
 
@@ -231,12 +239,9 @@ function buildMenuItems() {
   return [
     { id: 'chat', label: '说点什么…', hint: 'Alt+W' },
     { sep: true },
-    { id: 'netease', label: '打开网易云音乐' },
-    { id: 'playpause', label: '播放 / 暂停' },
-    { id: 'next', label: '下一首' },
     { id: 'walk', label: '走两步' },
-    { sep: true },
     { id: 'settings', label: '设置' },
+    { sep: true },
     { id: 'quit', label: '退出', danger: true }
   ];
 }
@@ -245,15 +250,6 @@ function runMenuAction(id) {
   switch (id) {
     case 'chat':
       windows.showBubble();
-      break;
-    case 'netease':
-      runQuick('打开网易云音乐');
-      break;
-    case 'playpause':
-      runQuick('暂停播放');
-      break;
-    case 'next':
-      runQuick('下一首');
       break;
     case 'walk':
       wander.nudge();
@@ -338,9 +334,10 @@ app.whenReady().then(() => {
   }
 });
 
-app.on('window-all-closed', (e) => {
-  // 常驻托盘，不随窗口关闭退出
-  e.preventDefault?.();
+app.on('window-all-closed', () => {
+  // 常驻托盘，不随窗口关闭退出。
+  // 注意：这个事件不传参数，别去碰 e（之前误写成 e.preventDefault() 会抛 TypeError 直接搞崩进程）。
+  // Electron 只要检测到有监听器就不会自动退出，无需 preventDefault。
 });
 
 app.on('before-quit', () => {

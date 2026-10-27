@@ -143,6 +143,9 @@ async function showSettings() {
 document.getElementById('btn-settings').addEventListener('click', showSettings);
 document.getElementById('btn-back').addEventListener('click', showChat);
 document.getElementById('btn-close').addEventListener('click', () => window.bubbleAPI.hide(true));
+document
+  .getElementById('btn-settings-close')
+  .addEventListener('click', () => window.bubbleAPI.hide(true));
 
 /* ---------------- 设置 ---------------- */
 

@@ -43,6 +43,29 @@ const v3 = windows.togglePet();
 check('第三次切换后隐藏', windows.isPetVisible(), false);
 check('返回值与可见性一致', v3, false);
 
+console.log('\n缩放（Alt+↑ / Alt+↓ 的逻辑）：');
+const base = windows.sizeForScale(0.85);
+check('scale 0.85 对应默认 180x196', `${base.width}x${base.height}`, '180x196');
+
+windows.togglePet(); // 确保可见
+const b0 = windows.getPetWindow().getBounds();
+
+windows.applyPetScale(1.2765); // 放大一档多点
+const b1 = windows.getPetWindow().getBounds();
+check('放大后宽度', b1.width, Math.round(base.width * (1.2765 / 0.85)));
+check('放大后高度', b1.height, Math.round(base.height * (1.2765 / 0.85)));
+check('底部锚点不变（视觉上原地长大）', b1.y + b1.height, b0.y + b0.height);
+
+windows.applyPetScale(0.45);
+const b2 = windows.getPetWindow().getBounds();
+check('缩到最小时宽度', b2.width, Math.round(base.width * (0.45 / 0.85)));
+
+windows.applyPetScale(9); // 越界会被夹住
+const b3 = windows.getPetWindow().getBounds();
+check('超上限被夹到 2.0', b3.width, Math.round(base.width * (2.0 / 0.85)));
+
+windows.applyPetScale(0.85); // 还原，避免影响后续断言
+
 console.log('\n自绘菜单：');
 const items = [
   { id: 'chat', label: '说点什么…', hint: 'Alt+W' },

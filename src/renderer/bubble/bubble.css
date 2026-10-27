@@ -46,6 +46,12 @@ body {
   position: relative;
 }
 
+/* 设置页：半透明，能透出桌面。聊天页保持实心，避免长文本被桌面内容干扰阅读 */
+.shell:has(#view-settings:not(.hidden)) {
+  background: rgba(24, 20, 18, 0.62);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
 /* 顶部一条暖色高光，增加层次 */
 .shell::before {
   content: "";

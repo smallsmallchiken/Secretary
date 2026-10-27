@@ -35,7 +35,10 @@ const DEFAULT_CONFIG = {
     // 和桌宠对话
     toggle: 'Alt+W',
     // 显示 / 隐藏桌宠（不退出进程）
-    petToggle: 'Alt+Q'
+    petToggle: 'Alt+Q',
+    // 放大 / 缩小桌宠
+    scaleUp: 'Alt+Up',
+    scaleDown: 'Alt+Down'
   },
   autoLaunch: false,
   // 性格与回复格式
