@@ -9,6 +9,15 @@ const PET_H = 196;
 const BUBBLE_W = 400;
 const BUBBLE_H = 560;
 
+// 气泡态（贴头小气泡）
+const BUBBLE_CHAT_W = 352;      // 窗口宽
+const BUBBLE_CHAT_MIN_H = 132;   // 云朵边框 + 输入行，再矮就不像对话框了
+const BUBBLE_CHAT_MAX_H = 380;  // 内容超了就让消息区内部滚动
+const HEAD_RATIO = 0.30;        // 脑袋在宠物窗口高度的 30% 处
+const TAIL_INSET = 20;          // 三角尾巴尖距「窗口底边」的距离（设置态面板用）
+const DOT_INSET = 11;           // 云朵下方「句号」圆点中心距窗口底边的距离：body 底 padding 6 + 半径 5
+const BUBBLE_GAP = 10;          // 气泡与宠物的水平间距
+
 // 尺寸换算基准：scale=0.85 时窗口正好 180x196
 const SCALE_BASE = 0.85;
 const SCALE_MIN = 0.45;
@@ -23,6 +32,9 @@ let pinUntil = 0;
 // 气泡窗口是懒创建的，页面没加载完就 send 会丢消息，先排队
 let bubbleReady = false;
 let pendingToBubble = [];
+let bubbleMode = 'chat';        // 'chat' | 'settings'
+let bubbleChatH = 220;          // 气泡态最近一次量到的高度
+let lastBubbleLayout = null;    // positionBubble() 最近一次算出的布局，供测试读取
 
 function pinBubble(ms = 2500) {
   pinUntil = Date.now() + ms;
@@ -117,9 +129,10 @@ function createPetWindow() {
 function createBubbleWindow() {
   if (bubbleWin && !bubbleWin.isDestroyed()) return bubbleWin;
 
+  bubbleMode = 'chat';
   bubbleWin = new BrowserWindow({
-    width: BUBBLE_W,
-    height: BUBBLE_H,
+    width: BUBBLE_CHAT_W,
+    height: bubbleChatH,
     frame: false,
     transparent: true,
     backgroundColor: '#00000000',
@@ -157,8 +170,21 @@ function createBubbleWindow() {
       if (bubbleWin.isFocused()) return;
       if (global.__dragging) return;
       if (Date.now() < pinUntil) return;
-      require('../core/debug').dbg('[blur] 触发隐藏');
-      hideBubble();
+      // 焦点落在对话框内部（输入框 / 设置表单）时不收起，
+      // 否则用户点一下输入框、系统顺手回一次 blur 就把面板收没了
+      const js =
+        "document.hasFocus() && document.activeElement && document.activeElement.tagName !== 'BODY'";
+      bubbleWin.webContents
+        .executeJavaScript(js)
+        .then((keep) => {
+          if (keep) return;
+          require('../core/debug').dbg('[blur] 触发隐藏');
+          hideBubble();
+        })
+        .catch(() => {
+          require('../core/debug').dbg('[blur] 触发隐藏（焦点查询失败）');
+          hideBubble();
+        });
     }, 250);
   });
 
@@ -170,32 +196,94 @@ function createBubbleWindow() {
   return bubbleWin;
 }
 
-/** 把气泡窗口摆到宠物旁边（优先左侧，放不下就右侧） */
+/**
+ * 把气泡窗口摆到宠物旁边，并让「指向脑袋的那一点」压在脑袋上。
+ *
+ * 锚点（距窗口某条边多少像素）：
+ *   设置态 = 三角尾巴尖，距窗口底边 TAIL_INSET(20)
+ *   聊天态 = 云朵下方那个「句号」圆点的中心，距窗口底边 DOT_INSET(11)
+ *           （bubble.css: body 底 padding 6 + 圆点半径 5）
+ * 气泡默认向上生长（锚点在下），上方放不下时翻到脑袋下方、锚点改走顶边。
+ */
 function positionBubble() {
-  if (!bubbleWin || !petWin) return;
+  if (!bubbleWin || bubbleWin.isDestroyed() || !petWin || petWin.isDestroyed()) return;
   const pb = petWin.getBounds();
-  const display = screen.getDisplayMatching(pb);
-  const wa = display.workArea;
-  const gap = 12;
+  const wa = screen.getDisplayMatching(pb).workArea;
+  const [bw, bh] = bubbleWin.getSize();
 
-  let x = pb.x - BUBBLE_W - gap;
-  // 左边放不下就放右边
-  if (x < wa.x + 8) x = pb.x + pb.width + gap;
+  const headY = pb.y + Math.round(pb.height * HEAD_RATIO);
+  const anchor = bubbleMode === 'settings' ? TAIL_INSET : DOT_INSET;
 
-  // 底部与宠物底部对齐
-  let y = pb.y + pb.height - BUBBLE_H;
-  if (y < wa.y + 8) y = wa.y + 8;
-  if (y + BUBBLE_H > wa.y + wa.height - 8) y = wa.y + wa.height - BUBBLE_H - 8;
+  // 左右：桌宠在工作区左半边 → 气泡挂右侧；右半边 → 挂左侧
+  const petCenterX = pb.x + pb.width / 2;
+  const waCenterX = wa.x + wa.width / 2;
+  let side = petCenterX < waCenterX ? 'right' : 'left';
 
-  // 最后兜底，别跑出屏幕
-  x = Math.max(wa.x + 8, Math.min(x, wa.x + wa.width - BUBBLE_W - 8));
+  const gap = bubbleMode === 'settings' ? 12 : BUBBLE_GAP;
+  const xFor = (s) => (s === 'left' ? pb.x - bw - gap : pb.x + pb.width + gap);
+  let x = xFor(side);
+  // 贴屏幕边缘放不下就翻边
+  if (x < wa.x + 8 || x + bw > wa.x + wa.width - 8) {
+    side = side === 'left' ? 'right' : 'left';
+    x = xFor(side);
+  }
+  x = Math.max(wa.x + 8, Math.min(x, wa.x + wa.width - bw - 8));
 
-  bubbleWin.setPosition(Math.round(x), Math.round(y));
+  // 气泡在脑袋上方生长，锚点（距底边 anchor）落在脑袋上
+  let below = false;
+  let y = headY - (bh - anchor);
+  if (y < wa.y + 8) {
+    // 上方放不下（桌宠被拖到屏幕顶部）→ 翻到脑袋下方，锚点改走顶边
+    below = true;
+    y = headY - anchor;
+  }
+  y = Math.max(wa.y + 8, Math.min(y, wa.y + wa.height - bh - 8));
+
+  x = Math.round(x);
+  y = Math.round(y);
+  bubbleWin.setPosition(x, y);
+  lastBubbleLayout = { side, below, x, y };
+  if (bubbleReady) bubbleWin.webContents.send('bubble:layout', { side, below });
 }
 
-function showBubble() {
+/** 渲染器量完高度后回调：改窗口尺寸再重新定位 */
+function resizeBubbleChat(height) {
+  if (!bubbleWin || bubbleWin.isDestroyed()) {
+    return { width: BUBBLE_CHAT_W, height: bubbleChatH };
+  }
+  const h = Math.max(
+    BUBBLE_CHAT_MIN_H,
+    Math.min(BUBBLE_CHAT_MAX_H, Math.round(Number(height) || bubbleChatH))
+  );
+  bubbleChatH = h;
+  if (bubbleMode === 'chat') {
+    bubbleWin.setBounds({ width: BUBBLE_CHAT_W, height: h });
+    positionBubble();
+  }
+  return { width: BUBBLE_CHAT_W, height: bubbleChatH };
+}
+
+/** 聊天态 ↔ 设置态切换（同一个窗口改尺寸） */
+function setBubbleMode(mode) {
+  bubbleMode = mode === 'settings' ? 'settings' : 'chat';
+  if (!bubbleWin || bubbleWin.isDestroyed()) return { mode: bubbleMode };
+  if (bubbleMode === 'settings') bubbleWin.setBounds({ width: BUBBLE_W, height: BUBBLE_H });
+  else bubbleWin.setBounds({ width: BUBBLE_CHAT_W, height: bubbleChatH });
+  positionBubble();
+  return { mode: bubbleMode };
+}
+
+/** 最近一次 positionBubble() 算出的布局（side/below/x/y），供离线测试断言 */
+function getBubbleLayout() {
+  return lastBubbleLayout;
+}
+
+function showBubble(pinMs = 2500) {
   const win = createBubbleWindow();
-  pinBubble(2500);
+  // 保护期由调用方决定：普通唤起 2.5s 够用，打开设置这类需要用户慢慢看的给更长
+  pinBubble(pinMs);
+  // 唤起时回到聊天态（同步切，position 之前），设置页由渲染器收到 bubble:open-settings 后再切
+  setBubbleMode('chat');
   positionBubble();
   if (!win.isVisible()) win.show();
   win.setAlwaysOnTop(true, 'screen-saver');
@@ -422,6 +510,9 @@ module.exports = {
   hideBubble,
   toggleBubble,
   positionBubble,
+  resizeBubbleChat,
+  setBubbleMode,
+  getBubbleLayout,
   pinBubble,
   isPinned,
   sendToPet,
@@ -442,5 +533,12 @@ module.exports = {
   PET_H,
   BUBBLE_W,
   BUBBLE_H,
+  BUBBLE_CHAT_W,
+  BUBBLE_CHAT_MIN_H,
+  BUBBLE_CHAT_MAX_H,
+  HEAD_RATIO,
+  TAIL_INSET,
+  DOT_INSET,
+  BUBBLE_GAP,
   petScale
 };

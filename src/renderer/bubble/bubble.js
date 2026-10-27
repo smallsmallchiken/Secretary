@@ -3,23 +3,114 @@
 const chat = document.getElementById('chat');
 const input = document.getElementById('input');
 const btnSend = document.getElementById('btn-send');
-const chips = document.getElementById('chips');
-const badge = document.getElementById('badge');
 
 const viewChat = document.getElementById('view-chat');
 const viewSettings = document.getElementById('view-settings');
 
-const QUICK_CHIPS = [
-  '打开网易云音乐',
-  '暂停播放',
-  '下一首',
-  '10分钟后提醒我喝水',
-  '现在几点',
-  '截个屏'
-];
-
 let sending = false;
-let chipsVisible = true;
+let heightReportPending = false;
+
+/* ---------------- 云朵轮廓 ---------------- */
+
+/**
+ * 日漫云朵对话框的轮廓。
+ *
+ * 做法：沿内缩矩形的周长均匀摆一圈等半径圆（相邻圆互相吃掉一点），
+ * 再把它们的**并集外边界**用圆弧连起来 —— 这就是手绘云朵那圈鼓包，
+ * 不是正弦扰动出来的锯齿，也不是被拉伸变形的固定 path。
+ *
+ * R 是鼓包半径，step 是鼓包间距。step 越接近 2R，凹口越深（越"泡"）。
+ */
+function cloudPathD(w, h, R = 15, step = 26) {
+  const inset = R; // 圆心内缩 R，凸起正好贴在画布边缘以内
+  const left = inset;
+  const right = w - inset;
+  const top = inset;
+  const bottom = h - inset;
+  const bw = right - left;
+  const bh = bottom - top;
+  if (bw < 4 || bh < 4) return `M 0 0 H ${w} V ${h} H 0 Z`;
+
+  const per = 2 * (bw + bh);
+  const count = Math.max(8, Math.round(per / step));
+  const gap = per / count;
+
+  // 圆心：顺时针沿周长走一圈
+  const centers = [];
+  for (let i = 0; i < count; i += 1) {
+    const d = i * gap;
+    if (d < bw) centers.push([left + d, top]);
+    else if (d < bw + bh) centers.push([right, top + (d - bw)]);
+    else if (d < 2 * bw + bh) centers.push([right - (d - bw - bh), bottom]);
+    else centers.push([left, bottom - (d - 2 * bw - bh)]);
+  }
+
+  // 相邻两圆的「外侧交点」= 两段圆弧的接缝
+  const half = gap / 2;
+  const bulge = Math.sqrt(Math.max(0, R * R - half * half));
+  const cx = w / 2;
+  const cy = h / 2;
+  const seams = centers.map((c, i) => {
+    const prev = centers[(i - 1 + count) % count];
+    const mx = (c[0] + prev[0]) / 2;
+    const my = (c[1] + prev[1]) / 2;
+    // 外法线：从中心指向接缝，够近似了
+    let nx = mx - cx;
+    let ny = my - cy;
+    const len = Math.hypot(nx, ny) || 1;
+    nx /= len;
+    ny /= len;
+    return [mx + nx * bulge, my + ny * bulge];
+  });
+
+  const f = (v) => v.toFixed(1);
+  let d = `M ${f(seams[0][0])} ${f(seams[0][1])}`;
+  for (let i = 0; i < count; i += 1) {
+    const end = seams[(i + 1) % count];
+    d += ` A ${f(R)} ${f(R)} 0 0 1 ${f(end[0])} ${f(end[1])}`;
+  }
+  return `${d} Z`;
+}
+
+const cloudSvg = document.querySelector('.cloud');
+const cloudPath = document.querySelector('.cloud-path');
+
+function drawCloud() {
+  if (!cloudSvg || !cloudPath) return;
+  const w = Math.round(cloudSvg.clientWidth);
+  const h = Math.round(cloudSvg.clientHeight);
+  if (w < 8 || h < 8) return;
+  cloudSvg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  cloudPath.setAttribute('d', cloudPathD(w, h));
+}
+
+if (typeof ResizeObserver === 'function') {
+  new ResizeObserver(() => drawCloud()).observe(cloudSvg);
+}
+window.addEventListener('resize', drawCloud);
+
+/* ---------------- 高度回传（贴头气泡按内容定高） ---------------- */
+
+/**
+ * 量出聊天态所需高度并回传主进程改窗口尺寸。
+ * 不读 .shell 的 scrollHeight（它有 max-height 量不准），
+ * 而是把云朵内容各段自然高度相加 + body 的 padding。
+ * rAF 包一层避免同一帧内多次触发布局抖动。
+ */
+function reportHeight() {
+  if (heightReportPending || (viewSettings && !viewSettings.classList.contains('hidden'))) return;
+  heightReportPending = true;
+  requestAnimationFrame(() => {
+    heightReportPending = false;
+    if (!viewSettings.classList.contains('hidden')) return; // 设置态不回传
+    const inner = document.querySelector('.cloud-inner');
+    const h =
+      (inner ? inner.offsetHeight : 0) +
+      18 + // #view-chat 的句号带（below 态是 padding-top，同一份高度）
+      12; // body padding 上下 6+6
+    window.bubbleAPI.resize(h);
+  });
+}
 
 /* ---------------- 消息渲染 ---------------- */
 
@@ -29,6 +120,7 @@ function pushMessage(role, text) {
   el.textContent = text;
   chat.appendChild(el);
   scrollBottom();
+  reportHeight();
   return el;
 }
 
@@ -51,25 +143,7 @@ function showTyping() {
 function hideTyping() {
   const el = document.getElementById('typing');
   if (el) el.remove();
-}
-
-function setChipsVisible(visible) {
-  chipsVisible = visible;
-  chips.style.display = visible ? 'flex' : 'none';
-}
-
-function buildChips() {
-  chips.innerHTML = '';
-  for (const text of QUICK_CHIPS) {
-    const btn = document.createElement('button');
-    btn.className = 'chip';
-    btn.textContent = text;
-    btn.addEventListener('click', () => {
-      input.value = text;
-      send();
-    });
-    chips.appendChild(btn);
-  }
+  reportHeight();
 }
 
 /* ---------------- 发送 ---------------- */
@@ -84,7 +158,6 @@ async function send(rawText) {
   input.style.height = 'auto';
 
   pushMessage('user', text);
-  setChipsVisible(false);
   showTyping();
 
   try {
@@ -123,7 +196,8 @@ input.addEventListener('keydown', (e) => {
 
 input.addEventListener('input', () => {
   input.style.height = 'auto';
-  input.style.height = `${Math.min(input.scrollHeight, 108)}px`;
+  input.style.height = `${Math.min(input.scrollHeight, 84)}px`;
+  reportHeight();
 });
 
 /* ---------------- 视图切换 ---------------- */
@@ -132,20 +206,36 @@ function showChat() {
   viewSettings.classList.add('hidden');
   viewChat.classList.remove('hidden');
   input.focus();
+  window.bubbleAPI.setMode('chat');
 }
 
 async function showSettings() {
   viewChat.classList.add('hidden');
   viewSettings.classList.remove('hidden');
   await loadSettings();
+  await window.bubbleAPI.setMode('settings');
 }
 
-document.getElementById('btn-settings').addEventListener('click', showSettings);
+// 对话框保持干净：不放任何按钮/提示词，右键出菜单（菜单里有设置、隐藏、退出）
+document.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  window.bubbleAPI.contextMenu();
+});
 document.getElementById('btn-back').addEventListener('click', showChat);
-document.getElementById('btn-close').addEventListener('click', () => window.bubbleAPI.hide(true));
-document
-  .getElementById('btn-settings-close')
-  .addEventListener('click', () => window.bubbleAPI.hide(true));
+
+// 主进程要求打开设置页（右键菜单的「设置」、托盘菜单走的都是这条）
+window.bubbleAPI.onOpenSettings(() => showSettings());
+document.getElementById('btn-settings-close').addEventListener('click', () =>
+  window.bubbleAPI.hide(true)
+);
+
+// Esc 收起：设置在输入框上时焦点可能在别处，所以挂在 document 上
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !e.isComposing) {
+    e.preventDefault();
+    window.bubbleAPI.hide(true);
+  }
+});
 
 /* ---------------- 设置 ---------------- */
 
@@ -215,11 +305,6 @@ async function loadSettings() {
   document.getElementById('persona-signature').value = p.signature || '';
 
   await loadReminders();
-
-  const info = await window.bubbleAPI.appInfo();
-  const path = await window.bubbleAPI.configPath();
-  document.getElementById('footnote').textContent =
-    `v${info.version} · Electron ${info.electron} · 配置文件：${path}`;
 }
 
 async function loadReminders() {
@@ -297,12 +382,9 @@ document.getElementById('btn-quit').addEventListener('click', () => {
   window.bubbleAPI.quit();
 });
 
-/* ---------------- 徽章 ---------------- */
+/* ---------------- 徽章（设置页不再显示，保留空实现以兼容调用点） ---------------- */
 
-function updateBadge(ready) {
-  badge.textContent = ready ? '智能模式' : '本地模式';
-  badge.classList.toggle('on', !!ready);
-}
+function updateBadge() {}
 
 /* ---------------- 事件绑定 ---------------- */
 
@@ -315,38 +397,29 @@ window.bubbleAPI.onFocusInput(() => {
 window.bubbleAPI.onPush((payload) => {
   if (!payload) return;
   pushMessage(payload.role || 'assistant', payload.text || '');
-  setChipsVisible(false);
 });
 
-window.bubbleAPI.onOpenSettings(() => showSettings());
+// 主进程算好的贴头布局：side = 气泡在宠物哪一侧
+// （'left' = 气泡在宠物左边 → 尾巴在气泡右边缘；'below' = 上方放不下，翻到脑袋下方）
+window.bubbleAPI.onLayout((payload) => {
+  if (!payload) return;
+  document.body.dataset.side = payload.side === 'right' ? 'right' : 'left';
+  if (payload.below) document.body.dataset.below = '1';
+  else delete document.body.dataset.below;
+});
 
 /* ---------------- 启动 ---------------- */
 
 async function boot() {
-  buildChips();
+  drawCloud();
   const info = await window.bubbleAPI.appInfo();
   updateBadge(info.llmReady);
 
-  // 等一下，让主进程可能已经排队的消息（比如提醒推送）先落地，
-  // 避免问候语插在提醒前面。
+  // 等一下，让主进程可能已经排队的消息（比如提醒推送）先落地。
   await new Promise((r) => setTimeout(r, 200));
 
-  if (chat.children.length > 0) {
-    setChipsVisible(false);
-    input.focus();
-    return;
-  }
-
-  const hour = new Date().getHours();
-  let greet = '在呢。';
-  if (hour < 6) greet = '还没睡？说吧，要我干什么。';
-  else if (hour < 11) greet = '早。要打开什么、放点歌，还是设个提醒？';
-  else if (hour < 14) greet = '中午好。吃完饭要不要听点东西？';
-  else if (hour < 18) greet = '下午好。有活儿直接说。';
-  else if (hour < 23) greet = '晚上好。要我放首歌还是定个提醒？';
-  else greet = '这么晚还在忙。要我帮你设个提醒早点睡吗？';
-
-  pushMessage('assistant', greet);
+  // 对话框保持干净：空态没有任何问候语、没有占位文案，就是一片安静的云。
+  reportHeight();
   input.focus();
 }
 

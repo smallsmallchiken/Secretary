@@ -90,7 +90,7 @@ check('气泡与宠物不重叠', bub.x + bub.width <= petBox.x, true);
 check('气泡不越出工作区上下沿', bub.y >= 0 && bub.y + bub.height <= 1040, true);
 
 const hMin = windows.resizeBubbleChat(5);
-check('高度夹取下限 BUBBLE_CHAT_MIN_H', hMin.height, 96);
+check('高度夹取下限 BUBBLE_CHAT_MIN_H', hMin.height, windows.BUBBLE_CHAT_MIN_H);
 const hMax = windows.resizeBubbleChat(9999);
 check('高度夹取上限 BUBBLE_CHAT_MAX_H', hMax.height, 380);
 const hMid = windows.resizeBubbleChat(200);

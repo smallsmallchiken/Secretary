@@ -8,7 +8,7 @@ const { dbg } = require('../core/debug');
 
 /**
  * 全局快捷键。
- *   Alt+W  和桌宠对话（打开气泡面板）
+ *   Alt+W  对话面板开 / 关（同一颗键来回切，不用鼠标去点叉）
  *   Alt+Q  显示 / 隐藏桌宠（进程常驻，不退出）
  *
  * 两个都可以在设置里改，配置项分别是 shortcuts.toggle / shortcuts.petToggle。
@@ -37,7 +37,7 @@ function registerShortcuts() {
   const chatAccel = config.get('shortcuts.toggle', 'Alt+W');
   const petAccel = config.get('shortcuts.petToggle', 'Alt+Q');
 
-  bind(chatAccel, () => windows.showBubble(), '对话');
+  bind(chatAccel, () => windows.toggleBubble(), '对话');
 
   bind(
     petAccel,
@@ -47,9 +47,9 @@ function registerShortcuts() {
     '显隐桌宠'
   );
 
-  // 兼容旧习惯：Ctrl+Shift+Space 也能唤出对话
+  // 兼容旧习惯：Ctrl+Shift+Space 也是开 / 关对话
   if (chatAccel !== 'Control+Shift+Space') {
-    bind('Control+Shift+Space', () => windows.showBubble(), '对话(备用)');
+    bind('Control+Shift+Space', () => windows.toggleBubble(), '对话(备用)');
   }
 
   // 缩放：Alt+↑ 放大，Alt+↓ 缩小

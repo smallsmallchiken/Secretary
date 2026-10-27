@@ -142,6 +142,12 @@ function registerIpc() {
     windows.showContextMenu(buildMenuItems());
   });
 
+  // 对话框上右键 → 同一个菜单（里面能进设置、隐藏桌宠、退出）
+  ipcMain.on('bubble:context-menu', () => {
+    windows.pinBubble(20000); // 菜单弹出期间别把气泡收了
+    windows.showContextMenu(buildMenuItems());
+  });
+
   // 自绘菜单的回调
   ipcMain.on('menu:pick', (_e, id) => {
     windows.hideContextMenu();
@@ -162,6 +168,10 @@ function registerIpc() {
       windows.pinBubble(10000);
     }
   });
+
+  ipcMain.handle('bubble:resize', (_e, height) => windows.resizeBubbleChat(height));
+
+  ipcMain.handle('bubble:mode', (_e, mode) => windows.setBubbleMode(mode));
 
   ipcMain.handle('bubble:hide', (_e, force = false) => {
     // 主动推送（比如提醒）的保护期内，忽略自动请求；用户点关闭时 force=true
@@ -236,10 +246,13 @@ function registerIpc() {
 /* ------------------------------------------------------------------ */
 
 function buildMenuItems() {
+  const wanderOn = config.get('behavior.allowWander', true) !== false;
+
   return [
-    { id: 'chat', label: '说点什么…', hint: 'Alt+W' },
+    { id: 'wander_toggle', label: '自己漫步', hint: wanderOn ? '开' : '关' },
+    { id: 'walk', label: '自己溜达一圈' },
     { sep: true },
-    { id: 'walk', label: '走两步' },
+    { id: 'chat', label: '说点什么…', hint: 'Alt+W' },
     { id: 'settings', label: '设置' },
     { sep: true },
     { id: 'quit', label: '退出', danger: true }
@@ -248,14 +261,24 @@ function buildMenuItems() {
 
 function runMenuAction(id) {
   switch (id) {
-    case 'chat':
-      windows.showBubble();
+    case 'wander_toggle': {
+      const now = config.get('behavior.allowWander', true) !== false;
+      const next = !now;
+      const cfg = config.set({ behavior: { allowWander: next } });
+      windows.sendToPet('pet:config', cfg);
+      wander.refresh();
+      dbg('[wander] 菜单切换为', next ? '允许漫步' : '禁止漫步');
       break;
+    }
     case 'walk':
       wander.nudge();
       break;
+    case 'chat':
+      windows.toggleBubble();
+      break;
     case 'settings':
-      windows.showBubble();
+      // 点开设置后别让面板因为失焦立刻收起，否则用户还没看清就没了
+      windows.showBubble(20000);
       setTimeout(() => windows.sendToBubble('bubble:open-settings'), 120);
       break;
     case 'quit':
@@ -326,7 +349,7 @@ app.whenReady().then(() => {
   // 调试用：--settings 启动直接打开设置面板，--chat 直接打开对话
   if (process.argv.includes('--settings') || process.argv.includes('--chat')) {
     setTimeout(() => {
-      windows.showBubble();
+      windows.showBubble(20000);
       if (process.argv.includes('--settings')) {
         setTimeout(() => windows.sendToBubble('bubble:open-settings'), 400);
       }

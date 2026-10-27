@@ -26,41 +26,15 @@ body {
   overflow: hidden;
   font-family: "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
   color: var(--text);
-  font-size: 13.5px;
+  font-size: 13px;
   -webkit-font-smoothing: antialiased;
 }
 
-.shell {
-  width: 100%;
-  height: 100%;
-  border-radius: 18px;
-  background: linear-gradient(170deg, #2c2521 0%, #1d1916 100%);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow:
-    0 24px 48px -12px rgba(0, 0, 0, 0.72),
-    0 0 0 1px rgba(0, 0, 0, 0.45),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  position: relative;
-}
-
-/* 设置页：半透明，能透出桌面。聊天页保持实心，避免长文本被桌面内容干扰阅读。
-   注意 backdrop-filter 在 Electron 透明窗口上模糊不了窗口外的桌面，只能靠不透明度保证可读性 */
-.shell:has(#view-settings:not(.hidden)) {
-  background: rgba(24, 20, 18, 0.74);
-  border-color: rgba(255, 255, 255, 0.16);
-}
-
-/* 顶部一条暖色高光，增加层次 */
-.shell::before {
-  content: "";
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, rgba(217, 160, 91, 0.55), transparent);
-  pointer-events: none;
+/* body 的 padding 是云朵边缘/描边留的透明呼吸区，句号落在下方 DOT 带里。
+   聊天态与设置态用同一批常量，主进程 windows.js 的 dotOffset 与之对齐：
+   pad 6 + 云朵底 12 + 句号带 14 ≈ 32px */
+body {
+  padding: 6px 10px;
 }
 
 .view {
@@ -68,86 +42,84 @@ body {
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  position: relative;
 }
 
 .hidden {
   display: none !important;
 }
 
-/* ---------------- 标题栏 ---------------- */
+/* ================================================================ */
+/* 聊天态：日漫云朵对话框                                            */
+/* ================================================================ */
 
-.titlebar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 14px 10px;
-  flex: 0 0 auto;
-  -webkit-app-region: drag;
+/* 句号带 18px：圆点贴在这条带的底部，中心距窗口底边 6+5=11px，
+   主进程 windows.js 的 DOT_INSET 与此对齐 */
+#view-chat {
+  padding-bottom: 18px;
+  overflow: visible;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
+/* 上方放不下、气泡翻到脑袋下方时：句号改挂顶边，圆点中心距窗口顶边 11px */
+body[data-below="1"] #view-chat {
+  padding-top: 18px;
+  padding-bottom: 0;
+}
+body[data-below="1"] .cloud {
+  top: 18px;
+  bottom: 0;
+  height: calc(100% - 18px);
+}
+body[data-below="1"] .cloud-dot {
+  top: 0;
+  bottom: auto;
 }
 
-.avatar {
-  width: 22px;
-  height: 22px;
+/* 云朵：轮廓由 bubble.js 按窗口实际尺寸生成（viewBox 与像素 1:1，不会拉伸变形） */
+.cloud {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 18px;
+  left: 0;
+  width: 100%;
+  height: calc(100% - 18px);
+  z-index: 1;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.cloud-path {
+  fill: #262019;
+  stroke: rgba(255, 255, 255, 0.2);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+
+/* 云朵下方独立的小圆点 —— 「句号」 */
+.cloud-dot {
+  position: absolute;
+  left: 36px;
+  bottom: 0;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  background:
-    radial-gradient(circle at 50% 62%, #f0e2d0 0 30%, transparent 31%),
-    linear-gradient(160deg, #d9a05b, #a86f2f);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
-  flex: 0 0 auto;
+  background: #262019;
+  box-shadow: inset 0 0 0 1.4px rgba(255, 255, 255, 0.2);
+  z-index: 1;
+  pointer-events: none;
 }
 
-.name {
-  font-size: 13.5px;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-  color: var(--text);
-}
-
-.badge {
-  font-size: 10px;
-  padding: 2px 7px;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-faint);
-  border: 1px solid var(--line);
-  white-space: nowrap;
-}
-
-.badge.on {
-  color: #d9a05b;
-  border-color: rgba(217, 160, 91, 0.35);
-  background: rgba(217, 160, 91, 0.1);
-}
-
-.tools {
+/* 内容层压在云朵上。四边留 22px 是为了避开轮廓的凹口：
+   鼓包半径 15 + 凹口最深约 7px，内容压到边就会穿出云外 */
+.cloud-inner {
+  position: relative;
+  z-index: 2;
   display: flex;
-  gap: 4px;
-  -webkit-app-region: no-drag;
-}
-
-.icon-btn {
-  width: 26px;
-  height: 26px;
-  display: grid;
-  place-items: center;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.icon-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text);
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 20px 24px 18px;
 }
 
 /* ---------------- 消息区 ---------------- */
@@ -157,30 +129,26 @@ body {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 4px 14px 8px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   scroll-behavior: smooth;
 }
 
 .chat::-webkit-scrollbar {
-  width: 6px;
+  width: 5px;
 }
 .chat::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.12);
   border-radius: 3px;
 }
-.chat::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
-}
 
 .msg {
-  max-width: 86%;
-  padding: 9px 12px;
-  border-radius: 14px;
-  line-height: 1.62;
-  font-size: 13px;
+  max-width: 88%;
+  padding: 7px 11px;
+  border-radius: 13px;
+  line-height: 1.55;
+  font-size: 12.5px;
   white-space: pre-wrap;
   word-break: break-word;
   animation: rise 0.22s ease-out;
@@ -207,7 +175,7 @@ body {
 
 .msg.assistant {
   align-self: flex-start;
-  background: var(--bg-raise);
+  background: rgba(255, 255, 255, 0.05);
   color: var(--text);
   border: 1px solid var(--line);
   border-bottom-left-radius: 5px;
@@ -265,77 +233,45 @@ body {
   }
 }
 
-/* ---------------- 快捷指令 ---------------- */
-
-.chips {
-  flex: 0 0 auto;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 0 14px 10px;
-}
-
-.chip {
-  font-size: 11.5px;
-  padding: 5px 10px;
-  border-radius: 20px;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.035);
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-  user-select: none;
-}
-
-.chip:hover {
-  border-color: rgba(217, 160, 91, 0.45);
-  color: var(--accent);
-  background: rgba(217, 160, 91, 0.08);
-}
-
 /* ---------------- 输入区 ---------------- */
 
 .composer {
   flex: 0 0 auto;
   display: flex;
   align-items: flex-end;
-  gap: 8px;
-  padding: 10px 12px 12px;
-  border-top: 1px solid var(--line);
-  background: rgba(0, 0, 0, 0.18);
+  gap: 6px;
+  padding: 8px 0 0;
 }
 
 #input {
   flex: 1 1 auto;
   resize: none;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.04);
+  border: none;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
   color: var(--text);
-  padding: 9px 12px;
-  font-size: 13px;
+  padding: 7px 10px;
+  font-size: 12.5px;
   font-family: inherit;
-  line-height: 1.5;
-  max-height: 108px;
+  line-height: 1.45;
+  max-height: 84px;
   outline: none;
-  transition: border-color 0.15s, background 0.15s;
+  transition: background 0.15s;
 }
 
 #input::placeholder {
-  color: var(--text-faint);
+  color: transparent;
 }
 
 #input:focus {
-  border-color: rgba(217, 160, 91, 0.45);
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.09);
 }
 
 .send-btn {
   flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
-  border-radius: 11px;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
   border: none;
   display: grid;
   place-items: center;
@@ -357,6 +293,122 @@ body {
   opacity: 0.4;
   cursor: default;
   transform: none;
+}
+
+/* ================================================================ */
+/* 设置态：标准面板（保持可读性）                                    */
+/* ================================================================ */
+
+.tail {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  bottom: 14px;
+  background: #1d1916;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  transform: rotate(45deg);
+  z-index: 1;
+  pointer-events: none;
+}
+
+#view-chat > .tail {
+  display: none; /* 聊天态用云朵+句号，不用三角尾 */
+}
+
+/* 只有设置态的尾巴跟着数据属性翻边（聊天态没有三角尾） */
+body[data-side="left"] #view-settings .tail {
+  right: 6px;
+}
+body[data-side="right"] #view-settings .tail {
+  left: 6px;
+}
+body[data-below="1"] #view-settings .tail {
+  top: 14px;
+  bottom: auto;
+}
+
+.shell {
+  width: 100%;
+  height: 100%;
+  border-radius: 18px;
+  background: rgba(22, 18, 16, 0.68);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow:
+    0 24px 48px -12px rgba(0, 0, 0, 0.72),
+    0 0 0 1px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  overflow: visible;
+  position: relative;
+  z-index: 2;
+  text-shadow:
+    0 1px 4px rgba(0, 0, 0, 0.92),
+    0 0 1px rgba(0, 0, 0, 0.7);
+}
+
+.shell input,
+.shell textarea {
+  text-shadow: none;
+}
+
+/* 顶部一条暖色高光，增加层次 */
+.shell::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  border-radius: 18px 18px 0 0;
+  background: linear-gradient(90deg, transparent, rgba(217, 160, 91, 0.55), transparent);
+  pointer-events: none;
+}
+
+/* ---------------- 标题栏 ---------------- */
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px 7px;
+  flex: 0 0 auto;
+  -webkit-app-region: drag;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.name {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--text);
+}
+
+.tools {
+  display: flex;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+}
+
+.icon-btn {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.icon-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
 }
 
 /* ---------------- 设置 ---------------- */
@@ -394,12 +446,6 @@ body {
   font-weight: 600;
   color: var(--accent);
   letter-spacing: 0.4px;
-}
-
-.group-hint {
-  font-size: 11.5px;
-  line-height: 1.65;
-  color: var(--text-faint);
 }
 
 .field {
@@ -606,12 +652,4 @@ body {
 .ghost-btn:hover {
   color: var(--danger);
   border-color: rgba(224, 108, 90, 0.35);
-}
-
-.footnote {
-  font-size: 10.5px;
-  color: var(--text-faint);
-  text-align: center;
-  line-height: 1.6;
-  padding-bottom: 4px;
 }

@@ -17,7 +17,13 @@ contextBridge.exposeInMainWorld('bubbleAPI', {
   appInfo: () => ipcRenderer.invoke('app:info'),
   quit: () => ipcRenderer.invoke('app:quit'),
 
+  resize: (height) => ipcRenderer.invoke('bubble:resize', height),
+  setMode: (mode) => ipcRenderer.invoke('bubble:mode', mode),
+
   onFocusInput: (cb) => ipcRenderer.on('bubble:focus-input', () => cb()),
   onPush: (cb) => ipcRenderer.on('bubble:push', (_e, payload) => cb(payload)),
-  onOpenSettings: (cb) => ipcRenderer.on('bubble:open-settings', () => cb())
+  onOpenSettings: (cb) => ipcRenderer.on('bubble:open-settings', () => cb()),
+  contextMenu: () => ipcRenderer.send('bubble:context-menu'),
+
+  onLayout: (cb) => ipcRenderer.on('bubble:layout', (_e, payload) => cb(payload))
 });
