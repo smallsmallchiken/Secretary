@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('path');
-const { app, ipcMain, Menu, shell, screen } = require('electron');
+const { app, ipcMain, shell, screen } = require('electron');
 
 const config = require('../core/config');
 const agent = require('../core/agent');
@@ -131,33 +131,18 @@ function registerIpc() {
   });
 
   ipcMain.on('pet:context-menu', () => {
-    const menu = Menu.buildFromTemplate([
-      { label: '说点什么…', accelerator: 'CommandOrControl+Shift+Space', click: () => windows.showBubble() },
-      { type: 'separator' },
-      { label: '打开网易云音乐', click: () => runQuick('打开网易云音乐') },
-      { label: '播放 / 暂停', click: () => runQuick('暂停播放') },
-      { label: '下一首', click: () => runQuick('下一首') },
-      { label: '静音切换', click: () => runQuick('静音') },
-      { type: 'separator' },
-      { label: '我的提醒', click: () => runQuick('我的提醒') },
-      { label: '回到右下角', click: () => {
-        const win = windows.getPetWindow();
-        if (!win) return;
-        const pos = windows.dockPosition(win);
-        win.setPosition(pos.x, pos.y);
-        windows.positionBubble();
-      } },
-      { label: '走两步', click: () => wander.nudge() },
-      { type: 'separator' },
-      { label: '设置', click: () => {
-        windows.showBubble();
-        setTimeout(() => windows.sendToBubble('bubble:open-settings'), 120);
-      } },
-      { label: '隐藏桌宠', click: () => windows.getPetWindow()?.hide() },
-      { label: '退出', click: () => quitApp() }
-    ]);
-    menu.popup({ window: windows.getPetWindow() });
+    windows.showContextMenu(buildMenuItems());
   });
+
+  // 自绘菜单的回调
+  ipcMain.on('menu:pick', (_e, id) => {
+    windows.hideContextMenu();
+    runMenuAction(id);
+  });
+
+  ipcMain.on('menu:close', () => windows.hideContextMenu());
+
+  ipcMain.on('menu:resize', (_e, size) => windows.resizeContextMenu(size));
 
   // 气泡对话
   ipcMain.handle('bubble:send', async (_e, text) => {
@@ -236,6 +221,53 @@ function registerIpc() {
     node: process.versions.node,
     llmReady: agent.llmReady()
   }));
+}
+
+/* ------------------------------------------------------------------ */
+/* 右键菜单（自绘透明菜单）                                             */
+/* ------------------------------------------------------------------ */
+
+function buildMenuItems() {
+  return [
+    { id: 'chat', label: '说点什么…', hint: 'Alt+W' },
+    { sep: true },
+    { id: 'netease', label: '打开网易云音乐' },
+    { id: 'playpause', label: '播放 / 暂停' },
+    { id: 'next', label: '下一首' },
+    { id: 'walk', label: '走两步' },
+    { sep: true },
+    { id: 'settings', label: '设置' },
+    { id: 'quit', label: '退出', danger: true }
+  ];
+}
+
+function runMenuAction(id) {
+  switch (id) {
+    case 'chat':
+      windows.showBubble();
+      break;
+    case 'netease':
+      runQuick('打开网易云音乐');
+      break;
+    case 'playpause':
+      runQuick('暂停播放');
+      break;
+    case 'next':
+      runQuick('下一首');
+      break;
+    case 'walk':
+      wander.nudge();
+      break;
+    case 'settings':
+      windows.showBubble();
+      setTimeout(() => windows.sendToBubble('bubble:open-settings'), 120);
+      break;
+    case 'quit':
+      quitApp();
+      break;
+    default:
+      break;
+  }
 }
 
 function runQuick(text) {

@@ -9,6 +9,11 @@ const PET_H = 196;
 const BUBBLE_W = 400;
 const BUBBLE_H = 560;
 
+// 尺寸换算基准：scale=0.85 时窗口正好 180x196
+const SCALE_BASE = 0.85;
+const SCALE_MIN = 0.45;
+const SCALE_MAX = 2.0;
+
 let petWin = null;
 let bubbleWin = null;
 let blurTimer = null;
@@ -28,7 +33,17 @@ function isPinned() {
 }
 
 function petScale() {
-  return Number(config.get('pet.scale', 0.85)) || 0.85;
+  const value = Number(config.get('pet.scale', SCALE_BASE));
+  return Number.isFinite(value) && value > 0 ? value : SCALE_BASE;
+}
+
+/** scale -> 窗口像素尺寸（渲染器内部会等比填满窗口） */
+function sizeForScale(scale) {
+  const ratio = scale / SCALE_BASE;
+  return {
+    width: Math.max(48, Math.round(PET_W * ratio)),
+    height: Math.max(52, Math.round(PET_H * ratio))
+  };
 }
 
 function preloadPath(name) {
@@ -50,9 +65,10 @@ function dockPosition(win) {
 }
 
 function createPetWindow() {
+  const initial = sizeForScale(petScale());
   petWin = new BrowserWindow({
-    width: PET_W,
-    height: PET_H,
+    width: initial.width,
+    height: initial.height,
     frame: false,
     transparent: true,
     resizable: false,
@@ -228,6 +244,177 @@ function getBubbleWindow() {
   return bubbleWin;
 }
 
+/* ------------------------------------------------------------------ */
+/* 桌宠显隐（快捷键 Alt+Q 用，不退出进程）                              */
+/* ------------------------------------------------------------------ */
+
+function isPetVisible() {
+  return !!(petWin && !petWin.isDestroyed() && petWin.isVisible());
+}
+
+function togglePet() {
+  if (!petWin || petWin.isDestroyed()) {
+    createPetWindow();
+    return true;
+  }
+  if (petWin.isVisible()) {
+    hideBubble();
+    hideContextMenu();
+    petWin.hide();
+    return false;
+  }
+  // 重新出现时保持在用户上次放的位置，不强行回右下角
+  petWin.show();
+  petWin.moveTop();
+  return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* 缩放（Alt+↑ 放大 / Alt+↓ 缩小）                                      */
+/* ------------------------------------------------------------------ */
+
+function applyPetScale(scale) {
+  const next = Math.min(SCALE_MAX, Math.max(SCALE_MIN, Number(scale) || SCALE_BASE));
+  const win = petWin && !petWin.isDestroyed() ? petWin : null;
+  if (!win) return next;
+
+  const b = win.getBounds();
+  const { width, height } = sizeForScale(next);
+  if (b.width === width && b.height === height) return next;
+
+  // 以底部中心为锚点，看起来像原地长大 / 缩小
+  const centerX = b.x + b.width / 2;
+  const bottom = b.y + b.height;
+  let x = Math.round(centerX - width / 2);
+  let y = Math.round(bottom - height);
+
+  const wa = screen.getDisplayMatching({ x, y, width, height }).workArea;
+  x = Math.max(wa.x, Math.min(x, wa.x + wa.width - width));
+  y = Math.max(wa.y, Math.min(y, wa.y + wa.height - height));
+
+  win.setBounds({ x, y, width, height });
+  positionBubble();
+  return next;
+}
+
+/** factor > 1 放大，< 1 缩小。返回 { scale, changed } */
+function stepPetScale(factor) {
+  const current = petScale();
+  const next = Math.min(SCALE_MAX, Math.max(SCALE_MIN, Number((current * factor).toFixed(3))));
+  if (Math.abs(next - current) < 0.001) {
+    return { scale: current, changed: false };
+  }
+  config.set({ pet: { scale: next } });
+  applyPetScale(next);
+  return { scale: next, changed: true };
+}
+
+/* ------------------------------------------------------------------ */
+/* 自绘右键菜单（原生 Menu 没法做透明，这里用透明窗口画）               */
+/* ------------------------------------------------------------------ */
+
+const MENU_W = 240;
+let menuWin = null;
+let menuShownAt = 0;
+
+function estimateMenuHeight(items) {
+  let h = 16 + 14; // body 外边距 8*2 + 卡片内边距 7*2
+  for (const it of items) h += it.sep ? 11 : 33;
+  return Math.max(64, Math.round(h));
+}
+
+function createMenuWindow() {
+  if (menuWin && !menuWin.isDestroyed()) return menuWin;
+
+  menuWin = new BrowserWindow({
+    width: MENU_W,
+    height: 120,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    show: false,
+    webPreferences: {
+      preload: preloadPath('menu-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  menuWin.setAlwaysOnTop(true, 'screen-saver');
+  menuWin.loadFile(path.join(__dirname, '..', 'renderer', 'menu', 'index.html'));
+
+  menuWin.on('blur', () => {
+    // 刚弹出的瞬间可能还没拿到焦点，给它一点缓冲
+    if (Date.now() - menuShownAt < 220) return;
+    hideContextMenu();
+  });
+
+  menuWin.on('closed', () => {
+    menuWin = null;
+  });
+
+  return menuWin;
+}
+
+function showContextMenu(items) {
+  const win = createMenuWindow();
+  const cursor = screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(cursor) || screen.getPrimaryDisplay();
+  const wa = display.workArea;
+
+  const height = estimateMenuHeight(items);
+  let x = cursor.x + 6;
+  let y = cursor.y + 6;
+  if (x + MENU_W > wa.x + wa.width - 8) x = cursor.x - MENU_W - 6;
+  if (y + height > wa.y + wa.height - 8) y = cursor.y - height - 6;
+
+  x = Math.max(wa.x + 8, Math.min(x, wa.x + wa.width - MENU_W - 8));
+  y = Math.max(wa.y + 8, Math.min(y, wa.y + wa.height - height - 8));
+
+  win.setBounds({ x: Math.round(x), y: Math.round(y), width: MENU_W, height });
+
+  const send = () => {
+    if (!win.isDestroyed()) win.webContents.send('menu:render', items);
+  };
+  if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send);
+  else send();
+
+  menuShownAt = Date.now();
+  if (!win.isVisible()) win.show();
+  win.focus();
+  win.moveTop();
+}
+
+/** 渲染器量出真实高度后回调，避免估算不准留空白 */
+function resizeContextMenu(size) {
+  if (!menuWin || menuWin.isDestroyed()) return;
+  const b = menuWin.getBounds();
+  const wa = screen.getDisplayMatching(b).workArea;
+  const width = Math.max(120, Math.round(size.width || b.width));
+  const height = Math.max(48, Math.round(size.height || b.height));
+  let { x, y } = b;
+  if (y + height > wa.y + wa.height - 8) {
+    y = Math.max(wa.y + 8, wa.y + wa.height - height - 8);
+  }
+  menuWin.setBounds({ x, y, width, height });
+}
+
+function hideContextMenu() {
+  if (menuWin && !menuWin.isDestroyed() && menuWin.isVisible()) menuWin.hide();
+}
+
+function getMenuWindow() {
+  return menuWin;
+}
+
 module.exports = {
   createPetWindow,
   createBubbleWindow,
@@ -241,6 +428,15 @@ module.exports = {
   sendToBubble,
   getPetWindow,
   getBubbleWindow,
+  getMenuWindow,
+  isPetVisible,
+  togglePet,
+  applyPetScale,
+  stepPetScale,
+  sizeForScale,
+  showContextMenu,
+  hideContextMenu,
+  resizeContextMenu,
   dockPosition,
   PET_W,
   PET_H,
