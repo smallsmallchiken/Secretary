@@ -46,9 +46,10 @@ body {
   position: relative;
 }
 
-/* 设置页：半透明，能透出桌面。聊天页保持实心，避免长文本被桌面内容干扰阅读 */
+/* 设置页：半透明，能透出桌面。聊天页保持实心，避免长文本被桌面内容干扰阅读。
+   注意 backdrop-filter 在 Electron 透明窗口上模糊不了窗口外的桌面，只能靠不透明度保证可读性 */
 .shell:has(#view-settings:not(.hidden)) {
-  background: rgba(24, 20, 18, 0.62);
+  background: rgba(24, 20, 18, 0.74);
   border-color: rgba(255, 255, 255, 0.16);
 }
 
