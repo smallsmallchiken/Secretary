@@ -96,6 +96,9 @@ function tick(ts) {
         render();
         locked = false;
         applyState('idle');
+        // 不能在这里直接 return：那会漏掉函数末尾的 requestAnimationFrame(tick)，
+        // 整个逐帧循环就此断掉，桌宠之后永远静止（tools/test-pet-anim.js 盯着这条）
+        requestAnimationFrame(tick);
         return;
       }
     }
