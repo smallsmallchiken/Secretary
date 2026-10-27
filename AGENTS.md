@@ -63,12 +63,20 @@ env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron . \
 ## 改完必须验证
 
 ```bash
-node tools/test-agent.js "现在几点了"      # 模块加载 + 规则链路
+npm test                                   # 一条命令跑完下面两条
+node tools/test-agent.js --check           # 离线断言 39 条：规则路由 / 时间解析 / LLM 路径回归
 node tools/test-wander.js                  # 漫游逻辑
+node tools/test-agent.js "现在几点了"      # 需要时再跑：真实链路（会联网）
 ```
 
-两个脚本都不启动窗口，用 `tools/electron-stub.js` 替身跑，秒级出结果。
-改了 `src/core/` 或 `src/main/` 就一定要跑。
+`--check` 不联网、不写盘（只临时增删一条提醒，最后还原），失败非零退出。
+脚本都不启动窗口，用 `tools/electron-stub.js` 替身跑，秒级出结果。
+改了 `src/core/` 或 `src/main/` 就一定要跑 `npm test`。
+
+## API Key 与配置
+
+`.data/config.json` 的 `llm.apiKey` 可以用环境变量 `PET_LLM_API_KEY` 覆盖
+（`config.getLLM()` 读取，不会写回文件）——在别人机器上跑、或 CI 里跑，就别把 Key 落盘。
 
 ## 提交规范
 
