@@ -321,6 +321,51 @@ async function runChecks() {
     } finally {
       fs.rmSync(menuDir, { recursive: true, force: true });
     }
+
+    /* ---- 第 7 组：逾期提醒补发 ---- */
+    console.log('\n[7] 逾期提醒补发');
+    const now = Date.now();
+    const stamp = new Date(now).toISOString();
+    fs.writeFileSync(
+      REMINDERS_FILE,
+      JSON.stringify(
+        [
+          { id: 'f1', text: '未来的事', at: new Date(now + 3600e3).toISOString(), createdAt: stamp },
+          { id: 'm1', text: '刚错过的事', at: new Date(now - 3600e3).toISOString(), createdAt: stamp },
+          { id: 'o1', text: '过期太久的事', at: new Date(now - 48 * 3600e3).toISOString(), createdAt: stamp }
+        ],
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    const fired = [];
+    const aliveAfterInit = reminder.init((item) => fired.push(item));
+
+    check(
+      '逾期 1h 的补发一次，并带「已经过了时间」标记',
+      fired.length === 1 && fired[0].missed === true && fired[0].text.includes('已经过了时间'),
+      JSON.stringify(fired)
+    );
+    check(
+      '逾期 48h 的不补发（直接丢弃）',
+      !fired.some((x) => x.text.includes('过期太久')),
+      JSON.stringify(fired.map((x) => x.text))
+    );
+    check(
+      '未来的提醒仍留在待办里',
+      aliveAfterInit.length === 1 && aliveAfterInit[0].id === 'f1',
+      JSON.stringify(aliveAfterInit.map((x) => x.id))
+    );
+    const afterInit = JSON.parse(fs.readFileSync(REMINDERS_FILE, 'utf8'));
+    check(
+      '补发过的从存储里清掉（下次启动不会重复补发）',
+      afterInit.length === 1 && afterInit[0].id === 'f1',
+      JSON.stringify(afterInit.map((x) => x.id))
+    );
+    // init() 给未来那条排了定时器，清掉免得进程挂住（文件随后由外层 finally 还原）
+    reminder.clearAll();
   } finally {
     // 无论成败都还原提醒队列
     if (reminderSnapshot == null) {

@@ -82,18 +82,56 @@ function fire(id) {
   }
 }
 
+const CATCH_UP_MS = 24 * 3600 * 1000; // 逾期不到 24 小时的提醒，启动时补发一次
+
+/**
+ * 补发一条已经过了时间的提醒。
+ * 它这时已经从存储里移除了（所以不会重复补发），这里只负责通知和回调。
+ */
+function fireMissed(item) {
+  console.log('[reminder] 补发逾期提醒：', item.text);
+
+  try {
+    if (Notification.isSupported()) {
+      new Notification({
+        title: '⏰ 提醒（已经过了时间）',
+        body: item.text,
+        timeoutType: 'never'
+      }).show();
+    }
+  } catch (err) {
+    console.warn('[reminder] 系统通知发不出去：', err.message);
+  }
+
+  if (typeof onFire === 'function') {
+    try {
+      // text 上带个标记：气泡面板不用改也能看出这条是补发的
+      onFire({ ...item, missed: true, text: `${item.text}（已经过了时间）` });
+    } catch (err) {
+      console.error('[reminder] 回调失败：', err.stack || err.message);
+    }
+  }
+}
+
 function init(callback) {
   onFire = callback;
   const list = readAll();
   const now = Date.now();
   const alive = [];
+  const missed = [];
   for (const item of list) {
-    if (new Date(item.at).getTime() > now) {
+    const at = new Date(item.at).getTime();
+    if (at > now) {
       alive.push(item);
       schedule(item);
+    } else if (now - at <= CATCH_UP_MS) {
+      // 到点时桌宠没开着：补发一次，而不是静默丢掉
+      missed.push(item);
     }
+    // 逾期超过 24 小时的直接丢弃
   }
   if (alive.length !== list.length) writeAll(alive);
+  for (const item of missed) fireMissed(item);
   return alive;
 }
 
