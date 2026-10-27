@@ -63,10 +63,11 @@ env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron . \
 ## 改完必须验证
 
 ```bash
-npm test                                   # 一条命令跑完下面三条
+npm test                                   # 一条命令跑完下面四条
 node tools/test-agent.js --check           # 离线断言 39 条：规则路由 / 时间解析 / LLM 路径回归
 node tools/test-wander.js                  # 漫游逻辑
 node tools/test-pet-anim.js                # 逐帧动画循环（一次性动画播完不能断）
+node tools/test-pet-ui.js                  # 桌宠尺寸恒定 + 拖动一定能收尾
 node tools/test-agent.js "现在几点了"      # 需要时再跑：真实链路（会联网）
 ```
 

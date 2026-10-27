@@ -9,7 +9,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "test": "node tools/test-agent.js --check && node tools/test-wander.js && node tools/test-pet-anim.js"
+    "test": "node tools/test-agent.js --check && node tools/test-wander.js && node tools/test-pet-anim.js && node tools/test-pet-ui.js"
   },
   "devDependencies": {
     "electron": "^33.4.11"
