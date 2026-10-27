@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self';"
+    />
+    <title>比格多栋</title>
+    <link rel="stylesheet" href="bubble.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <!-- 主界面 -->
+      <section id="view-chat" class="view">
+        <header class="titlebar">
+          <div class="brand">
+            <span class="avatar"></span>
+            <span class="name">比格多栋</span>
+            <span id="badge" class="badge">本地模式</span>
+          </div>
+          <div class="tools">
+            <button id="btn-settings" class="icon-btn" title="设置">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </button>
+            <button id="btn-close" class="icon-btn" title="收起 (Esc)">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <main id="chat" class="chat"></main>
+
+        <div id="chips" class="chips"></div>
+
+        <footer class="composer">
+          <textarea id="input" rows="1" placeholder="说点什么… 比如「打开网易云」"></textarea>
+          <button id="btn-send" class="send-btn" title="发送 (Enter)">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 19V5M5 12l7-7 7 7" />
+            </svg>
+          </button>
+        </footer>
+      </section>
+
+      <!-- 设置界面 -->
+      <section id="view-settings" class="view hidden">
+        <header class="titlebar">
+          <div class="brand">
+            <button id="btn-back" class="icon-btn" title="返回">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M19 12H5M12 19l-7-7 7-7" />
+              </svg>
+            </button>
+            <span class="name">设置</span>
+          </div>
+        </header>
+
+        <div class="settings-body">
+          <div class="field-group">
+            <div class="group-title">智能模式</div>
+            <div class="group-hint">
+              不填 Key 也能用：打开应用、控制音乐、设提醒、查时间、截图这些本地指令已经内置。
+              填了 Key 之后才能自由对话、理解复杂说法。
+            </div>
+
+            <label class="switch-row">
+              <span>启用模型</span>
+              <input type="checkbox" id="llm-enabled" />
+              <span class="switch"></span>
+            </label>
+
+            <label class="field">
+              <span>接口地址</span>
+              <input type="text" id="llm-baseurl" placeholder="https://api.deepseek.com" />
+            </label>
+
+            <label class="field">
+              <span>API Key</span>
+              <input type="password" id="llm-apikey" placeholder="sk-..." />
+            </label>
+
+            <label class="field">
+              <span>模型名</span>
+              <input type="text" id="llm-model" placeholder="deepseek-chat" />
+            </label>
+          </div>
+
+          <div class="field-group">
+            <div class="group-title">行为</div>
+            <label class="switch-row">
+              <span>开机自动启动</span>
+              <input type="checkbox" id="auto-launch" />
+              <span class="switch"></span>
+            </label>
+            <label class="switch-row">
+              <span>让它自己溜达</span>
+              <input type="checkbox" id="auto-idle" />
+              <span class="switch"></span>
+            </label>
+            <label class="field">
+              <span>唤起快捷键</span>
+              <input type="text" id="shortcut" placeholder="Control+Shift+Space" />
+            </label>
+          </div>
+
+          <div class="field-group">
+            <div class="group-title">提醒</div>
+            <div id="reminder-list" class="reminder-list"></div>
+          </div>
+
+          <div class="settings-actions">
+            <button id="btn-save" class="primary-btn">保存</button>
+            <button id="btn-quit" class="ghost-btn">退出桌宠</button>
+          </div>
+
+          <div class="footnote" id="footnote"></div>
+        </div>
+      </section>
+    </div>
+
+    <script src="bubble.js"></script>
+  </body>
+</html>

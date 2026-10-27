@@ -1,0 +1,16 @@
+{
+  "name": "secretary-pet",
+  "productName": "万能桌宠",
+  "version": "0.1.0",
+  "description": "A desktop pet that can actually get things done on Windows.",
+  "main": "src/main/main.js",
+  "author": "Secretary",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11"
+  }
+}

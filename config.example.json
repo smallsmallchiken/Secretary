@@ -1,0 +1,35 @@
+{
+  "api": {
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key": "在这里填你的 API Key",
+    "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "temperature": 0.85,
+    "max_tokens": 512,
+    "timeout_s": 120
+  },
+  "pet": {
+    "spritesheet": "pets/duodong/spritesheet.webp",
+    "scale": 0.85,
+    "frame_interval_ms": 110,
+    "speed_px": 3,
+    "wander": true,
+    "wander_delay_s": [14, 34],
+    "walk_duration_s": [2.0, 5.0],
+    "idle_emote_chance": 0.45,
+    "bubble_timeout_s": 12,
+    "start_position": "bottom-right",
+    "margin_px": 48
+  },
+  "anims": {
+    "idle": { "row": 0, "frames": 6 },
+    "walk_r": { "row": 1, "frames": 8 },
+    "walk_l": { "row": 2, "frames": 8 },
+    "wave": { "row": 3, "frames": 4 },
+    "talk": { "row": 4, "frames": 5 },
+    "cry": { "row": 5, "frames": 8 },
+    "shake": { "row": 6, "frames": 6 },
+    "chew": { "row": 7, "frames": 6 },
+    "happy": { "row": 8, "frames": 6 }
+  },
+  "persona": "你是桌宠「多栋」，一只懒洋洋但很黏人的比格犬，住在用户的 Windows 桌面上。说话口语化、机灵、偶尔吐槽或撒娇，像真的小狗一样有情绪。回答必须短：一般 60 字以内，最多不超过 120 字。禁止使用 Markdown、列表、代码块、标题。遇到技术问题就用人话给最关键的一两句建议。"
+}

@@ -1,0 +1,24 @@
+# 虚拟环境（体积大，不入库）
+.venv/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# Node 依赖
+node_modules/
+
+# 含 API Key 的本地配置，不要提交
+config.json
+
+# Electron 版运行时数据（含 API Key、提醒队列、调试日志）
+.data/
+
+# electron-builder 产物
+dist/
+
+# 临时截图 / 调试产物
+.workbuddy/tmp/
+
+# AI 助手工作目录（记忆、调试脚本），不属于项目本身
+.workbuddy/
