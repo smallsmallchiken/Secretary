@@ -92,10 +92,24 @@ window.addEventListener('resize', drawCloud);
 /* ---------------- 高度回传（贴头气泡按内容定高） ---------------- */
 
 /**
- * 量出聊天态所需高度并回传主进程改窗口尺寸。
- * 不读 .shell 的 scrollHeight（它有 max-height 量不准），
- * 而是把云朵内容各段自然高度相加 + body 的 padding。
- * rAF 包一层避免同一帧内多次触发布局抖动。
+ * 消息区里真正的内容高度。
+ * 不能读 chat.scrollHeight —— 它是 flex:1 的滚动容器，空着时
+ * scrollHeight 也等于 clientHeight，气泡只会撑大、永远缩不回去。
+ * 所以按子元素逐个累加（含 flex gap）。
+ */
+function chatContentHeight() {
+  const kids = chat.children;
+  if (!kids.length) return 0;
+  const gap = parseFloat(getComputedStyle(chat).rowGap) || 0;
+  let h = 0;
+  for (let i = 0; i < kids.length; i += 1) h += kids[i].offsetHeight;
+  return h + gap * (kids.length - 1);
+}
+
+/**
+ * 量出聊天态「自然高度」并回传主进程改窗口尺寸。
+ * 内边距 + 消息内容 + 输入行 + 句号带 + body padding。
+ * rAF 包一层，避免同一帧内多次触发布局抖动。
  */
 function reportHeight() {
   if (heightReportPending || (viewSettings && !viewSettings.classList.contains('hidden'))) return;
@@ -104,11 +118,17 @@ function reportHeight() {
     heightReportPending = false;
     if (!viewSettings.classList.contains('hidden')) return; // 设置态不回传
     const inner = document.querySelector('.cloud-inner');
+    const composer = viewChat.querySelector('.composer');
+    const cs = inner ? getComputedStyle(inner) : null;
+    const innerPad = cs ? parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) : 38;
     const h =
-      (inner ? inner.offsetHeight : 0) +
-      18 + // #view-chat 的句号带（below 态是 padding-top，同一份高度）
-      12; // body padding 上下 6+6
-    window.bubbleAPI.resize(h);
+      innerPad +
+      chatContentHeight() +
+      (composer ? composer.offsetHeight : 0) +
+      18 + // #view-chat 的句号带（below 态改成 padding-top，高度一样）
+      12 + // body padding 上下 6+6
+      2; // 取整留白，否则最后一条消息的圆角会被输入行切掉
+    window.bubbleAPI.resize(h).then(() => scrollBottom());
   });
 }
 

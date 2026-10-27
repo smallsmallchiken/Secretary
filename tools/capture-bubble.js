@@ -30,7 +30,16 @@ ipcMain.handle('app:info', async () => ({ version: '0.0.0', electron: 'x', llmRe
 ipcMain.handle('config:get', async () => ({}));
 ipcMain.handle('config:path', async () => '.data/config.json');
 ipcMain.handle('reminder:list', async () => []);
-ipcMain.handle('bubble:resize', noop);
+// 让截图真实反映「按内容自适应高度」的效果
+let shotWin = null;
+ipcMain.handle('bubble:resize', async (_e, height) => {
+  if (!shotWin || shotWin.isDestroyed()) return null;
+  const h = Math.max(120, Math.min(380, Math.round(Number(height) || 220)));
+  console.log('[resize] 渲染器要', height, '-> 窗口', h);
+  const b = shotWin.getBounds();
+  if (b.height !== h) shotWin.setBounds({ x: b.x, y: b.y, width: b.width, height: h });
+  return { width: b.width, height: h };
+});
 ipcMain.handle('bubble:mode', noop);
 ipcMain.handle('bubble:send', async () => ({ type: 'ok', message: '汪！收到。' }));
 ipcMain.handle('bubble:hide', noop);
@@ -41,7 +50,7 @@ ipcMain.handle('app:quit', () => app.quit());
 app.disableHardwareAcceleration();
 
 app.whenReady().then(async () => {
-  const win = new BrowserWindow({
+  const win = (shotWin = new BrowserWindow({
     width: SETTINGS ? 400 : 352,
     height: SETTINGS ? 560 : 220,
     frame: false,
@@ -55,7 +64,7 @@ app.whenReady().then(async () => {
       contextIsolation: true,
       nodeIntegration: false
     }
-  });
+  }));
 
   win.webContents.on('console-message', (_e, level, message) => {
     console.log(`[renderer:${level}] ${message}`);

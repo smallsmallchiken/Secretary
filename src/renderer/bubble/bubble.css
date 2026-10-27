@@ -144,6 +144,9 @@ body[data-below="1"] .cloud-dot {
 }
 
 .msg {
+  /* 别让 flex 容器把消息压扁：压扁后量出来的高度偏小，
+     气泡按错误的数字定高，最后一条就被输入行切掉半截 */
+  flex: 0 0 auto;
   max-width: 88%;
   padding: 7px 11px;
   border-radius: 13px;
@@ -199,6 +202,7 @@ body[data-below="1"] .cloud-dot {
 
 /* 打字指示 */
 .typing {
+  flex: 0 0 auto;
   display: flex;
   gap: 4px;
   align-items: center;
