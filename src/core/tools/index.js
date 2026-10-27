@@ -5,6 +5,7 @@ const media = require('./media');
 const system = require('./system');
 const reminder = require('./reminder');
 const wechat = require('./wechat');
+const config = require('../config');
 
 /**
  * 工具注册表。
@@ -25,7 +26,10 @@ const TOOLS = [
       required: ['app_name']
     },
     async run({ app_name }) {
-      return apps.openApp(app_name);
+      // 用户可以在配置的 appAliases 里写死路径，优先级最高
+      // 形如 { "网易云": "D:\\software\\restore-app\\CloudMusic\\cloudmusic.exe" }
+      const aliases = config.get('appAliases', {}) || {};
+      return apps.openApp(app_name, aliases);
     }
   },
   {
@@ -83,6 +87,19 @@ const TOOLS = [
     }
   },
   {
+    name: 'open_path',
+    label: '打开路径',
+    description: '打开一个文件或文件夹路径。',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: '要打开的完整路径' } },
+      required: ['path']
+    },
+    async run({ path }) {
+      return system.run('open_path', { path });
+    }
+  },
+  {
     name: 'clipboard_write',
     label: '写入剪贴板',
     description: '把一段文字复制到系统剪贴板，方便用户直接粘贴。',
@@ -135,7 +152,7 @@ const TOOLS = [
         text: { type: 'string', description: '提醒的内容，例如「喝水」「开会」' },
         at: {
           type: 'string',
-          description: '提醒时间，ISO 8601 本地时间格式，例如 2026-10-28T15:00:00'
+          description: '提醒时间，必须是包含完整日期的 ISO 8601 本地时间，例如 2026-11-05T15:00:00，不要只给时分'
         }
       },
       required: ['text', 'at']
@@ -159,13 +176,20 @@ const TOOLS = [
   {
     name: 'cancel_reminder',
     label: '取消提醒',
-    description: '取消一条提醒。不传 id 时清空全部。',
+    description: '取消一条提醒，按 id 或按内容取消；清空全部必须显式传 all: true。',
     parameters: {
       type: 'object',
-      properties: { id: { type: 'string', description: '提醒 id，不传则清空全部' } }
+      properties: {
+        id: { type: 'string', description: '提醒 id' },
+        text: { type: 'string', description: '提醒内容的关键词，取消所有包含它的提醒' },
+        all: { type: 'boolean', description: '为 true 时清空全部提醒，必须用户明确要求' }
+      }
     },
-    async run({ id }) {
-      return id ? reminder.cancel(id) : reminder.clearAll();
+    async run({ id, text, all } = {}) {
+      if (id) return reminder.cancel(id);
+      if (text) return reminder.cancelByText(text);
+      if (all) return reminder.clearAll();
+      throw new Error('要取消哪一条？给我提醒 id 或内容；要清空全部请明确说「清空所有提醒」');
     }
   },
   {

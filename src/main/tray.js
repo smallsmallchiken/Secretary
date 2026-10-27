@@ -46,7 +46,7 @@ function buildMenu() {
       checked: !!config.get('autoLaunch'),
       click: (item) => {
         config.set({ autoLaunch: item.checked });
-        app.setLoginItemSettings({ openAtLogin: item.checked });
+        require('../main/main').applyAutoLaunch(item.checked);
         refreshTray();
       }
     },

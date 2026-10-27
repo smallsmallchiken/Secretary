@@ -85,4 +85,7 @@ node tools/test-wander.js                  # 漫游逻辑
 - `reg.exe` 在本机工具沙箱属程序黑名单，`execFile('reg')` 会失败。应用内已用 PowerShell 兜底
   （`src/core/tools/apps.js` 的 `psQueryDefault`）。
 - 沙箱内启动外部程序会 `spawn EPERM`，所以"打开应用"类功能无法在沙箱里端到端验证，属正常。
-- 本机没装网易云客户端，预设会降级打开 `music.163.com` 网页版。
+- 网易云客户端装在非标准目录 `D:\software\restore-app\CloudMusic\`，靠 `.data/config.json` 的
+  `appAliases` 显式指定路径才能启动。改「打开应用」相关逻辑时别把这个分支删了。
+- 本沙箱会拦经 Bash 发起的 PowerShell 调用，所以 `findByRunKey`（自启项反查）在这里测不出来，
+  不代表它在真实运行环境下失效。

@@ -34,6 +34,49 @@ if (!gotLock) {
 let dragState = null;
 
 /* ------------------------------------------------------------------ */
+/* 开机自启                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 注册 / 取消开机自启。
+ *
+ * 关键：未打包运行时 process.execPath 是 electron.exe，光设 openAtLogin 会注册成
+ * 「开机启动 electron.exe 但不带项目路径」，拉起的是个空 Electron 进程。
+ * 所以必须把项目路径塞进 args。打包后 execPath 就是 app 自己的 exe，不需要参数。
+ */
+function applyAutoLaunch(enabled) {
+  const on = !!enabled;
+  const opts = { openAtLogin: on };
+  if (!app.isPackaged) {
+    opts.path = process.execPath;
+    // 必须把项目路径和这套渲染参数一起带上：
+    // 少了 --disable-gpu 那组，开机启动时 GPU 进程会崩（本机实测）。
+    opts.args = [
+      app.getAppPath(),
+      '--no-sandbox',
+      '--disable-gpu',
+      '--disable-gpu-compositing',
+      '--disable-software-rasterizer'
+    ];
+  }
+  try {
+    app.setLoginItemSettings(opts);
+    dbg(
+      '[autolaunch]', on ? '已开启' : '已关闭',
+      '| path=', opts.path || '(打包后的 exe)',
+      '| args=', JSON.stringify(opts.args || [])
+    );
+    // 回读确认，Windows 上写注册表失败是静默的
+    const actual = app.getLoginItemSettings(opts).openAtLogin;
+    dbg('[autolaunch] 回读 openAtLogin =', actual);
+    return { ok: true, enabled: actual };
+  } catch (err) {
+    dbg('[autolaunch] 失败：', err.message);
+    return { ok: false, message: err.message };
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 核心消息处理                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -152,7 +195,7 @@ function registerIpc() {
       registerShortcuts();
     }
     if (patch && patch.autoLaunch !== undefined) {
-      app.setLoginItemSettings({ openAtLogin: !!patch.autoLaunch });
+      applyAutoLaunch(patch.autoLaunch);
     }
     if (patch && patch.pet) {
       const win = windows.getPetWindow();
@@ -250,7 +293,7 @@ app.whenReady().then(() => {
     setTimeout(() => windows.sendToPet('pet:state', { state: 'idle' }), 4000);
   });
 
-  app.setLoginItemSettings({ openAtLogin: !!config.get('autoLaunch') });
+  applyAutoLaunch(config.get('autoLaunch'));
 
   // 调试用：--settings 启动直接打开设置面板，--chat 直接打开对话
   if (process.argv.includes('--settings') || process.argv.includes('--chat')) {
@@ -281,4 +324,4 @@ app.on('will-quit', () => {
   unregisterShortcuts();
 });
 
-module.exports = { handleUserMessage, quitApp, runQuick };
+module.exports = { handleUserMessage, quitApp, runQuick, applyAutoLaunch };

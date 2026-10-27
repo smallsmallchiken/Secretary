@@ -143,14 +143,48 @@ src/
 
 ## 已知情况
 
-**网易云客户端没装。** 注册表、常见路径、开始菜单都搜过，没有 `cloudmusic.exe`。
-所以「打开网易云」会打开 `music.163.com` 网页版。装了客户端后会自动优先用客户端。
+**网易云装在非标准目录。** 它在 `D:\software\restore-app\CloudMusic\`，注册表和常见路径都猜不到，
+所以通过 `appAliases` 显式配置了路径（见下）。
 
 **会看到两只狗。** 之前通过 petdex 装的静态桌宠还在跑（窗口标题 `多栋`，纯皮肤无能力）。
 在 Petdex Desktop 里关掉它，只留这个。
 
 **沙箱环境限制。** 如果启动时提示 `spawn EPERM`，是运行环境禁止启动外部程序；
 正常双击启动不受此限制。
+
+---
+
+## 应用装在奇怪目录时怎么办
+
+「打开应用」的查找顺序是：配置里的 `appAliases` → 常见路径 → 注册表 App Paths →
+开机自启项反查 → 开始菜单 → 协议 → 网页版。
+
+如果都找不到（比如装在了 `D:\software\restore-app\...` 这种地方），
+直接在 `.data/config.json` 里写死路径，这是优先级最高的一档：
+
+```json
+"appAliases": {
+  "网易云": "D:\\software\\restore-app\\CloudMusic\\cloudmusic.exe",
+  "微信": "C:\\Program Files (x86)\\Tencent\\WeChat\\WeChat.exe"
+}
+```
+
+键名可以用口语别名（说「打开网易云」就能命中）。
+
+---
+
+## 开机自启
+
+托盘菜单或设置面板里勾选「开机自动启动」，会写入
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。
+
+开发模式下注册的命令会带上项目路径和那排 `--disable-gpu` 参数——
+少了它们，开机启动时会因为 GPU 进程崩溃而失败。打包成 exe 后只需注册 exe 本身。
+
+**托盘图标在哪：** 应用窗口设了 `skipTaskbar`，不会占用任务栏。
+图标由系统托盘承载，Windows 11 默认把新图标收进 `^` 折叠区。
+想让它常驻任务栏，点 `^` 展开后把它拖到外面即可（系统记住这个设置）。
+
 
 ---
 

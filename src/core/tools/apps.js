@@ -178,6 +178,30 @@ const startMenuDirs = [
   path.join(process.env.APPDATA || '', 'Microsoft\\Windows\\Start Menu\\Programs')
 ];
 
+/**
+ * 从开机自启项里反查可执行文件路径。
+ * 网易云、微信这类客户端通常自己会注册自启，这是绕过非标准安装目录的好线索
+ * （比如装在 D:\software\restore-app\... 这种地方，靠常见路径根本猜不到）。
+ */
+async function findByRunKey(exeName) {
+  if (!exeName) return null;
+  const script = [
+    "$p = Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -ErrorAction SilentlyContinue",
+    "if ($p) {",
+    `  ($p.PSObject.Properties | Where-Object { $_.Value -like '*${exeName}*' } | Select-Object -First 1).Value`,
+    '}'
+  ].join('\n');
+  try {
+    const out = await runPowerShell(script, 10000);
+    if (!out) return null;
+    const m = out.match(/"([^"]+\.exe)"|([A-Za-z]:\\[^\s"]+\.exe)/i);
+    const p = m ? m[1] || m[2] : null;
+    return p && fs.existsSync(p) ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 function findByStartMenu(name) {
   // 在开始菜单里找名字匹配的 .lnk（浅层扫描，避免太慢）
   const stack = startMenuDirs.filter((d) => d && fs.existsSync(d));
@@ -207,14 +231,33 @@ function findByStartMenu(name) {
   return null;
 }
 
+/**
+ * 启动一个可执行文件。
+ *
+ * 注意：spawn 失败（EPERM / ENOENT）不会同步抛错，而是异步 emit 'error'。
+ * 不监听的话会变成未捕获异常，直接把主进程搞崩——所以这里包成 Promise，
+ * 并给一个很短的窗口来捕捉"立刻失败"的情况。
+ */
 function launch(target) {
-  // 直接启动，脱离父进程
-  const child = spawn(target, [], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: false
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const child = spawn(target, [], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false
+    });
+    child.once('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+    setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.unref();
+      resolve();
+    }, 200);
   });
-  child.unref();
 }
 
 async function openApp(rawName, extraAliases = {}) {
@@ -222,25 +265,37 @@ async function openApp(rawName, extraAliases = {}) {
   if (!name) throw new Error('没有指定要打开的程序');
 
   const lower = name.toLowerCase();
+
+  // 0) 用户在 appAliases 里写死的路径，优先级最高（装在奇怪目录时的终极兜底）
+  const customPath = extraAliases[name] || extraAliases[lower];
+  if (customPath && typeof customPath === 'string' && fs.existsSync(customPath)) {
+    try {
+      await launch(customPath);
+      return { ok: true, message: `已打开${name}`, detail: customPath };
+    } catch (err) {
+      throw new Error(`找到 ${customPath}，但启动失败：${err.message}`);
+    }
+  }
+
   const presetKey =
     ALIASES[lower] ||
     ALIASES[name] ||
-    (PRESETS[name] ? name : null) ||
-    extraAliases[name] ||
-    extraAliases[lower];
+    (PRESETS[name] ? name : null);
 
   // 1) 已经有预设
   if (presetKey && PRESETS[presetKey]) {
     const preset = PRESETS[presetKey];
     let exePath = findByPaths(preset.paths);
     if (!exePath) exePath = await findByRegistry(preset.exe);
+    // 装在非标准目录时（例如 D:\software\restore-app\...），靠自启项反查
+    if (!exePath) exePath = await findByRunKey(preset.exe);
     if (!exePath && preset.exe) {
       // 系统自带命令（notepad.exe 之类）直接交给 shell
       const sys = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', preset.exe);
       if (fs.existsSync(sys)) exePath = sys;
     }
     if (exePath) {
-      launch(exePath);
+      await launch(exePath);
       return { ok: true, message: `已打开${presetKey}`, detail: exePath };
     }
 
@@ -267,7 +322,7 @@ async function openApp(rawName, extraAliases = {}) {
       await shell.openPath(name);
       return { ok: true, message: '已打开文件夹', detail: name };
     }
-    launch(name);
+    await launch(name);
     return { ok: true, message: '已启动程序', detail: name };
   }
 
@@ -281,14 +336,21 @@ async function openApp(rawName, extraAliases = {}) {
   const guessExe = name.toLowerCase().endsWith('.exe') ? name : `${name}.exe`;
   const fromReg = await findByRegistry(guessExe);
   if (fromReg) {
-    launch(fromReg);
+    await launch(fromReg);
     return { ok: true, message: `已打开${name}`, detail: fromReg };
+  }
+
+  // 4.5) 自启项反查
+  const fromRun = await findByRunKey(guessExe);
+  if (fromRun) {
+    await launch(fromRun);
+    return { ok: true, message: `已打开${name}`, detail: fromRun };
   }
 
   // 5) 开始菜单
   const lnk = findByStartMenu(name);
   if (lnk) {
-    launch(lnk);
+    await launch(lnk);
     return { ok: true, message: `已打开${name}`, detail: lnk };
   }
 
