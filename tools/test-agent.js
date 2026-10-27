@@ -387,6 +387,38 @@ async function runChecks() {
     check('open_url 拒绝非 http(s) 协议', !!badUrl, 'no error');
     const goodUrl = await tools.execute('open_url', { url: 'https://example.com' });
     check('open_url 放行 https', goodUrl && goodUrl.ok === true, JSON.stringify(goodUrl));
+
+    /* ---- 第 9 组：重复提醒 / 半夜12点 / 日志轮转 ---- */
+    console.log('\n[9] 重复提醒 / 半夜12点 / 日志轮转');
+    const repeat = agent.matchLocal('每天10点提醒我喝水');
+    check('「每天…」被识别成重复提醒', repeat && repeat._repeat === true, JSON.stringify(repeat));
+    const repeatRes = await agent.handle('每天10点提醒我喝水');
+    check(
+      '重复提醒照旧设一次，但明确说只响这一次',
+      repeatRes.type === 'text' && repeatRes.message.includes('只响这一次'),
+      JSON.stringify(repeatRes)
+    );
+    const oneShot = agent.matchLocal('明天下午三点提醒我交报告');
+    check('普通提醒不会被误标成重复', oneShot && !oneShot._repeat, JSON.stringify(oneShot));
+
+    const hourCases = [
+      ['晚上12点', 0],
+      ['夜里12点', 0],
+      ['凌晨12点', 0],
+      ['半夜12点', 0],
+      ['中午12点', 12],
+      ['下午12点', 12],
+      ['凌晨2点', 2],
+      ['半夜1点', 1]
+    ];
+    for (const [text, hour] of hourCases) {
+      const d = agent.parseWhen(text);
+      check(`parseWhen(${text}) 落在 ${hour} 点`, d && d.getHours() === hour, d ? String(d) : 'null');
+    }
+
+    const debug = require(path.join(ROOT, 'src/core/debug.js'));
+    check('日志超过 1MB 触发轮转', debug.shouldRotate(2 * 1024 * 1024) === true, 'shouldRotate(2MB) !== true');
+    check('日志没超限就不轮转', debug.shouldRotate(1024) === false, 'shouldRotate(1KB) !== false');
   } finally {
     // 无论成败都还原提醒队列
     if (reminderSnapshot == null) {

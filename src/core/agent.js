@@ -46,7 +46,7 @@ function parseWhen(input, base = new Date()) {
 
   // 绝对时间
   const re = new RegExp(
-    `(今天|明天|后天|大后天)?\\s*(早上|早晨|上午|中午|下午|傍晚|晚上|夜里)?\\s*${NUM_TOKEN}\\s*[点時时:：]\\s*(半|${NUM_TOKEN})?`
+    `(今天|明天|后天|大后天)?\\s*(早上|早晨|上午|中午|下午|傍晚|晚上|夜里|凌晨|半夜)?\\s*${NUM_TOKEN}\\s*[点時时:：]\\s*(半|${NUM_TOKEN})?`
   );
   m = text.match(re);
   if (!m) return null;
@@ -64,8 +64,15 @@ function parseWhen(input, base = new Date()) {
   if (minute > 59) minute = 0;
 
   const d = new Date(base);
-  if (period === '下午' || period === '傍晚' || period === '晚上' || period === '夜里') {
+  if (period === '下午' || period === '傍晚') {
     if (hour < 12) hour += 12;
+  } else if (period === '晚上' || period === '夜里') {
+    if (hour < 12) hour += 12;
+    // 「晚上12点」是半夜，不是中午
+    else if (hour === 12) hour = 0;
+  } else if (period === '凌晨' || period === '半夜') {
+    // 凌晨2点就是 02:00，不能加 12；只有 12 点是特例
+    if (hour === 12) hour = 0;
   } else if (period === '中午') {
     if (hour < 11) hour += 12;
   } else if (period === '早上' || period === '早晨' || period === '上午') {
@@ -133,7 +140,7 @@ function matchLocal(raw) {
     // 从内容里剥掉时间描述
     content = content
       .replace(/(\d+(?:\.\d+)?|半|[零〇一二两三四五六七八九十]{1,3})\s*个?\s*(秒|分钟|分|小时|钟头|天)\s*(?:之?后|以后)/g, '')
-      .replace(/(今天|明天|后天|大后天)?\s*(早上|早晨|上午|中午|下午|傍晚|晚上|夜里)?\s*[\d零〇一二两三四五六七八九十]{1,3}\s*[点時时:：]\s*(半|[\d零〇一二两三四五六七八九十]{1,3})?/g, '')
+      .replace(/(今天|明天|后天|大后天)?\s*(早上|早晨|上午|中午|下午|傍晚|晚上|夜里|凌晨|半夜)?\s*[\d零〇一二两三四五六七八九十]{1,3}\s*[点時时:：]\s*(半|[\d零〇一二两三四五六七八九十]{1,3})?/g, '')
       .replace(/^(要|去|让我|我|记得|的|个|一下|帮我)+/g, '')
       .replace(/^(去|要|记得)+/g, '')
       .trim();
@@ -142,7 +149,9 @@ function matchLocal(raw) {
       return { tool: 'set_reminder', args: { text: '', at: when ? when.toISOString() : '' }, _missingContent: true };
     }
     if (when) {
-      return { tool: 'set_reminder', args: { text: content, at: when.toISOString() } };
+      const args = { text: content, at: when.toISOString() };
+      // 「每天/每周」这类重复提醒还没做，标出来让 handle() 把话说清楚
+      return REPEAT_HINT.test(text) ? { tool: 'set_reminder', args, _repeat: true } : { tool: 'set_reminder', args };
     }
     return { tool: 'set_reminder', args: { text: content, at: '' }, _missingTime: true };
   }
@@ -232,6 +241,9 @@ function llmReady() {
 
 // 出现这些信号说明是复合/复杂意图，本地规则单条匹配会吃掉一半语义，应该交给模型
 const COMPLEX_HINT = /然后|再(帮|把|去|说|看)|并且|顺便|同时|先.{0,8}再|以及|之后|还要/;
+
+// 重复提醒（每天/每周…）目前不支持：照旧设最近一次，但必须告诉用户只响这一次
+const REPEAT_HINT = /每天|每日|每周|每星期|每个?月|每小时|每\s*[\d零〇一二两三四五六七八九十]{1,3}\s*(秒|分钟|分|小时|钟头|天)/;
 
 // 多意图信号、本地没命中、或者本地命中了但句子很长（多半夹带了别的意思）→ 交给模型
 function isComplex(text, local) {
@@ -424,6 +436,18 @@ async function handle(rawInput) {
     };
     remember(text, res.message);
     return res;
+  }
+
+  // 「每天/每周」这类重复提醒还没做：照旧设最近一次，但把话说清楚，别让用户以为设上了重复的
+  if (local && local._repeat && !preferLLM) {
+    try {
+      const result = await tools.execute(local.tool, local.args);
+      const res = { type: 'text', message: `${result.message}。不过重复提醒我还没做，这条只响这一次。` };
+      remember(text, res.message);
+      return res;
+    } catch (err) {
+      return { type: 'error', message: friendlyError(err) };
+    }
   }
 
   // 微信草稿：如果配置了模型，让它把话写得更自然

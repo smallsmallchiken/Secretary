@@ -52,6 +52,8 @@ function schedule(item) {
     if (new Date(item.at).getTime() - Date.now() > 1000) schedule(item);
     else fire(item.id);
   }, Math.min(delay, MAX_DELAY));
+  // 不 unref 的话，一个几小时后的提醒会把这个进程钉住不退（自检脚本就卡在这）
+  if (timer.unref) timer.unref();
   timers.set(item.id, timer);
 }
 

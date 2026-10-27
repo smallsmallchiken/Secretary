@@ -145,7 +145,9 @@ const TOOLS = [
   {
     name: 'set_reminder',
     label: '设置提醒',
-    description: '在指定时间提醒用户做某件事，到点会弹系统通知并且桌宠会跳出来。',
+    description:
+      '在指定时间提醒用户做某件事，到点会弹系统通知并且桌宠会跳出来。只支持一次性提醒，' +
+      '不支持「每天/每周」这种重复提醒——遇到这种要求要如实告诉用户只设了最近一次。',
     parameters: {
       type: 'object',
       properties: {
