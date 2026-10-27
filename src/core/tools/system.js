@@ -45,6 +45,9 @@ async function run(action, args = {}) {
     case 'open_url': {
       const url = String(args.url || '').trim();
       if (!url) throw new Error('要打开哪个网址？');
+      // 只放行 http/https：和 bubble:open-external 的校验保持一致，
+      // 否则模型给的 file:// 或自定义协议会被原样交给系统打开
+      if (!/^https?:\/\//i.test(url)) throw new Error('只支持 http/https 网址');
       await shell.openExternal(url);
       return { ok: true, message: '已在浏览器打开' };
     }

@@ -366,6 +366,27 @@ async function runChecks() {
     );
     // init() 给未来那条排了定时器，清掉免得进程挂住（文件随后由外层 finally 还原）
     reminder.clearAll();
+
+    /* ---- 第 8 组：问回去 + 网址白名单 ---- */
+    console.log('\n[8] 问回去 / 网址白名单');
+    const askContent = await agent.handle('10分钟后提醒我');
+    check(
+      '「10分钟后提醒我」回问内容，不塞占位文字',
+      askContent.type === 'text' && askContent.message.includes('要提醒什么'),
+      JSON.stringify(askContent)
+    );
+    const askTime = await agent.handle('提醒我喝水');
+    check(
+      '「提醒我喝水」回问时间',
+      askTime.type === 'text' && askTime.message.includes('什么时候'),
+      JSON.stringify(askTime)
+    );
+    const badUrl = await throwsAsync(() =>
+      tools.execute('open_url', { url: 'file:///C:/Windows/System32/calc.exe' })
+    );
+    check('open_url 拒绝非 http(s) 协议', !!badUrl, 'no error');
+    const goodUrl = await tools.execute('open_url', { url: 'https://example.com' });
+    check('open_url 放行 https', goodUrl && goodUrl.ok === true, JSON.stringify(goodUrl));
   } finally {
     // 无论成败都还原提醒队列
     if (reminderSnapshot == null) {

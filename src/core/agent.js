@@ -4,6 +4,7 @@ const config = require('./config');
 const llm = require('./llm');
 const tools = require('./tools');
 const persona = require('./persona');
+const { formatWhen } = require('./tools/reminder');
 const { dbg } = require('./debug');
 
 /* ------------------------------------------------------------------ */
@@ -136,7 +137,10 @@ function matchLocal(raw) {
       .replace(/^(要|去|让我|我|记得|的|个|一下|帮我)+/g, '')
       .replace(/^(去|要|记得)+/g, '')
       .trim();
-    if (!content) content = '该做事情了';
+    // 只说了时间没说内容（「10分钟后提醒我」）：问清楚，别塞一句占位文字进去
+    if (!content) {
+      return { tool: 'set_reminder', args: { text: '', at: when ? when.toISOString() : '' }, _missingContent: true };
+    }
     if (when) {
       return { tool: 'set_reminder', args: { text: content, at: when.toISOString() } };
     }
@@ -407,6 +411,17 @@ async function handle(rawInput) {
 
   if (local && local._needTarget) {
     const res = { type: 'text', message: '要取消哪一条？可以说「取消提醒 喝水」，或者明确说「清空所有提醒」。' };
+    remember(text, res.message);
+    return res;
+  }
+
+  // 提醒但没说内容
+  if (local && local._missingContent) {
+    const when = local.args.at ? formatWhen(new Date(local.args.at)) : '';
+    const res = {
+      type: 'text',
+      message: when ? `好的，${when}提醒你。要提醒什么？` : '要提醒你做什么？比如「提醒我喝水」。'
+    };
     remember(text, res.message);
     return res;
   }
