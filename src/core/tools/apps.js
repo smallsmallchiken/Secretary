@@ -207,10 +207,18 @@ async function findByRunKey(exeName) {
   }
 }
 
-function findByStartMenu(name) {
-  // 在开始菜单里找名字匹配的 .lnk（浅层扫描，避免太慢）
-  const stack = startMenuDirs.filter((d) => d && fs.existsSync(d));
+/**
+ * 在开始菜单里找名字匹配的 .lnk（浅层扫描，避免太慢）。
+ * 优先级：全等 > 前缀 > 包含。包含只在名字够长时才认——否则说「QQ」会先撞上
+ * 「QQ音乐」这种别的快捷方式。dirs 可注入，方便离线用例。
+ */
+function findByStartMenu(name, dirs = startMenuDirs) {
+  const key = String(name || '').toLowerCase();
+  if (!key) return null;
+  const stack = dirs.filter((d) => d && fs.existsSync(d));
   let depth = 0;
+  let best = null;
+  let bestScore = -1;
   while (stack.length && depth < 3) {
     const dir = stack.shift();
     let entries;
@@ -227,13 +235,19 @@ function findByStartMenu(name) {
       }
       if (!e.name.toLowerCase().endsWith('.lnk')) continue;
       const base = e.name.slice(0, -4).toLowerCase();
-      if (base === name.toLowerCase() || base.includes(name.toLowerCase())) {
-        return full;
+      let score = -1;
+      if (base === key) score = 2;
+      else if (base.startsWith(key)) score = 1;
+      else if (key.length >= 3 && base.includes(key)) score = 0;
+      if (score > bestScore) {
+        bestScore = score;
+        best = full;
+        if (score === 2) return full; // 全等，不用再扫了
       }
     }
     depth += 1;
   }
-  return null;
+  return best;
 }
 
 /**
@@ -368,4 +382,13 @@ async function openApp(rawName, extraAliases = {}) {
   }
 }
 
-module.exports = { openApp, PRESETS, ALIASES, findByPaths, findByRegistry, expandEnv, psQuote };
+module.exports = {
+  openApp,
+  PRESETS,
+  ALIASES,
+  findByPaths,
+  findByRegistry,
+  findByStartMenu,
+  expandEnv,
+  psQuote
+};

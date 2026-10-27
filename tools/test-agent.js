@@ -18,6 +18,7 @@ const ROOT = path.join(__dirname, '..');
 const STUB = path.join(__dirname, 'electron-stub.js');
 const REMINDERS_FILE = path.join(ROOT, '.data', 'reminders.json');
 const fs = require('fs');
+const os = require('os');
 
 const originalResolve = Module._resolveFilename;
 Module._resolveFilename = function (request, ...rest) {
@@ -292,6 +293,34 @@ async function runChecks() {
       quoted === "a'';calc;''" && !quoted.replace(/''/g, '').includes("'"),
       JSON.stringify(quoted)
     );
+
+    /* ---- 第 6 组：开始菜单匹配优先级 ---- */
+    console.log('\n[6] 开始菜单匹配');
+    const menuDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secretary-startmenu-'));
+    try {
+      for (const n of ['微信.lnk', '腾讯会议.lnk', 'QQ.lnk', 'QQ音乐.lnk', 'Notepad.lnk']) {
+        fs.writeFileSync(path.join(menuDir, n), '');
+      }
+      const expect = [
+        ['QQ', 'QQ.lnk'],
+        ['qq音乐', 'QQ音乐.lnk'],
+        ['微信', '微信.lnk'],
+        ['腾讯会议', '腾讯会议.lnk'],
+        ['Notepad', 'Notepad.lnk'],
+        ['会议', null], // 名字太短，不接受「包含」匹配
+        ['记事本', null]
+      ];
+      for (const [name, want] of expect) {
+        const got = apps.findByStartMenu(name, [menuDir]);
+        check(
+          `findByStartMenu(${JSON.stringify(name)}) -> ${want || 'null'}`,
+          (want ? path.basename(got || '') === want : got === null),
+          got ? path.basename(got) : 'null'
+        );
+      }
+    } finally {
+      fs.rmSync(menuDir, { recursive: true, force: true });
+    }
   } finally {
     // 无论成败都还原提醒队列
     if (reminderSnapshot == null) {
