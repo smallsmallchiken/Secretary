@@ -83,7 +83,9 @@ function tick(ts) {
 
   const frameDuration = 1000 / anim.fps;
   if (elapsed >= frameDuration) {
-    elapsed = 0;
+    elapsed -= frameDuration;
+    // 长时间卡顿后不追帧，避免一次性快进
+    if (elapsed > frameDuration * 4) elapsed = 0;
     frameIndex += 1;
     if (frameIndex >= anim.frames) {
       if (anim.loop) {
@@ -227,16 +229,6 @@ stage.addEventListener('mouseleave', () => {
     setState('idle', { force: true });
   }
 });
-
-// 鼠标穿透优化：只有指针在宠物像素上时才接收事件
-let ignoring = false;
-function updateHitTest(e) {
-  const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  const y = e.clientY - rect.top;
-  if (x < 0 || y < 0 || x > rect.width || y > rect.height) return false;
-  return true;
-}
 
 /* ---------------- 初始化 ---------------- */
 

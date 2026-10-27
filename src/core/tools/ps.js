@@ -6,13 +6,13 @@ const { spawn } = require('child_process');
  * 用 -EncodedCommand（UTF-16LE base64）调用 PowerShell，
  * 彻底绕开引号/中文/换行的转义地狱。
  */
-function runPowerShell(script, timeout = 10000) {
+function runPowerShell(script, timeout = 10000, env) {
   return new Promise((resolve, reject) => {
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
     const ps = spawn(
       'powershell.exe',
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
-      { windowsHide: true }
+      { windowsHide: true, env: env ? { ...process.env, ...env } : process.env }
     );
 
     let stdout = '';

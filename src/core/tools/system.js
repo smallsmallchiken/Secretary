@@ -1,6 +1,9 @@
 'use strict';
 
-const { shell, clipboard, Notification } = require('electron');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { shell, clipboard } = require('electron');
 const { spawn } = require('child_process');
 const { runPowerShell } = require('./ps');
 
@@ -55,25 +58,21 @@ async function run(action, args = {}) {
       return { ok: true, message: text ? `剪贴板内容：${text.slice(0, 200)}` : '剪贴板是空的', data: text };
     }
 
-    case 'notify':
-      if (Notification.isSupported()) {
-        new Notification({ title: args.title || '桌宠', body: String(args.body || '') }).show();
-      }
-      return { ok: true, message: '已通知' };
-
     case 'screenshot': {
-      // 全屏截图存到桌面
-      const file = args.path || `${require('os').homedir()}\\Desktop\\pet-screenshot-${Date.now()}.png`;
+      // 全屏截图存到桌面。路径通过环境变量传给 PowerShell，不拼接进脚本，避免注入
+      let file = String(args.path || '').trim();
+      if (!file) file = path.join(os.homedir(), 'Desktop', `pet-screenshot-${Date.now()}.png`);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
       const script = `
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
 $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
 $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-$bmp.Save("${file.replace(/\\/g, '\\\\')}", [System.Drawing.Imaging.ImageFormat]::Png)
+$bmp.Save($env:PET_SHOT_PATH, [System.Drawing.Imaging.ImageFormat]::Png)
 $g.Dispose(); $bmp.Dispose()
 `;
-      await runPowerShell(script, 15000);
+      await runPowerShell(script, 15000, { PET_SHOT_PATH: file });
       return { ok: true, message: `截图已保存：${file}`, data: file };
     }
 

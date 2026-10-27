@@ -8,7 +8,8 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "dev": "electron . --dev"
+    "dev": "electron . --dev",
+    "test": "node tools/test-agent.js --check && node tools/test-wander.js"
   },
   "devDependencies": {
     "electron": "^33.4.11"
