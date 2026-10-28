@@ -7,6 +7,7 @@ const config = require('../core/config');
 const agent = require('../core/agent');
 const reminder = require('../core/tools/reminder');
 const qqbot = require('../core/qq/bot');
+const wxbot = require('../core/wechat/bot');
 const windows = require('./windows');
 const wander = require('./wander');
 const { createTray, refreshTray } = require('./tray');
@@ -154,11 +155,14 @@ function registerIpc() {
   });
 
   ipcMain.on('pet:context-menu', () => {
+    // 菜单是同步渲染的，只能用缓存；顺手刷一下，下次打开就是准的
+    wxbot.refresh().catch(() => {});
     windows.showContextMenu(buildMenuItems());
   });
 
   // 对话框上右键 → 同一个菜单（里面能进设置、隐藏桌宠、退出）
   ipcMain.on('bubble:context-menu', () => {
+    wxbot.refresh().catch(() => {});
     windows.pinBubble(20000); // 菜单弹出期间别把气泡收了
     windows.showContextMenu(buildMenuItems());
   });
@@ -263,6 +267,7 @@ function registerIpc() {
 function buildMenuItems() {
   const wanderOn = config.get('behavior.allowWander', true) !== false;
   const qqSt = qqbot.status();
+  const wxSt = wxbot.status();
 
   return [
     { id: 'wander_toggle', label: '自己漫步', hint: wanderOn ? '开' : '关' },
@@ -273,6 +278,12 @@ function buildMenuItems() {
       label: 'QQ 自动回复',
       hint: qqSt.running ? `值守中(${qqSt.whitelistCount}人)` : qqSt.enabled ? '已启用(未连上)' : '关',
       danger: qqSt.running
+    },
+    {
+      id: 'wx_toggle',
+      label: '微信自动回复',
+      hint: !wxSt.available ? '未配置' : wxSt.running ? '值守中' : '关',
+      danger: wxSt.running
     },
     { sep: true },
     { id: 'chat', label: '说点什么…', hint: 'Alt+W' },
@@ -310,6 +321,21 @@ function runMenuAction(id) {
           }
         })
         .catch((err) => dbg('[qq] 切换失败:', err.message));
+      break;
+    case 'wx_toggle':
+      wxbot
+        .toggle()
+        .then((st) => {
+          dbg('[wx] 菜单切换后状态:', JSON.stringify(st));
+          if (!st.available) {
+            windows.showBubble();
+            windows.sendToBubble('bubble:push', {
+              role: 'assistant',
+              text: '微信自动回复需要 wechat-bot/py312 那个 Python 环境，现在找不到。'
+            });
+          }
+        })
+        .catch((err) => dbg('[wx] 切换失败:', err.message));
       break;
     case 'chat':
       windows.toggleBubble();
@@ -368,6 +394,20 @@ app.whenReady().then(() => {
     windows.showBubble();
     windows.sendToBubble('bubble:push', { role: 'assistant', text, data: { kind: 'qq' } });
   });
+
+  // 微信自动回复：跑在独立的 python 进程里，这里只负责开关和状态跟踪。
+  // 退出桌宠**不**顺手杀掉它 —— 它是独立值守的服务，说停才停（右键菜单里能停）。
+  wxbot.setNotifier((text) => {
+    windows.showBubble();
+    windows.sendToBubble('bubble:push', { role: 'assistant', text, data: { kind: 'wx' } });
+  });
+  wxbot
+    .refresh(true)
+    .then((st) => dbg('[wx] 初始状态:', JSON.stringify(st)))
+    .catch((err) => dbg('[wx] 初始状态失败:', err.message));
+  // 右键菜单要同步返回，只能用缓存，所以后台每 5 秒刷一次
+  const wxTimer = setInterval(() => wxbot.refresh().catch(() => {}), 5000);
+  if (wxTimer.unref) wxTimer.unref();
 
   // 恢复未到期的提醒
   dbg('[reminder] init 读取到', reminder.list().length, '条待办');
