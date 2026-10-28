@@ -300,7 +300,6 @@ function buildMenuItems() {
     { id: 'qq_toggle', label: 'QQ 自动回复', hint: qqHint, danger: qqSt.running },
     { id: 'wx_toggle', label: '微信自动回复', hint: wxHint, danger: wxSt.running },
     { sep: true },
-    { id: 'chat', label: '说点什么…', hint: 'Alt+W' },
     { id: 'settings', label: '设置' },
     { sep: true },
     { id: 'quit', label: '退出', danger: true }
@@ -350,9 +349,6 @@ function runMenuAction(id) {
           }
         })
         .catch((err) => dbg('[wx] 切换失败:', err.message));
-      break;
-    case 'chat':
-      windows.toggleBubble();
       break;
     case 'settings':
       // 点开设置后别让面板因为失焦立刻收起，否则用户还没看清就没了

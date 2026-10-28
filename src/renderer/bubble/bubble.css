@@ -96,11 +96,11 @@ body[data-below="1"] .cloud-dot {
   overflow: visible;
 }
 
-/* 云朵本体：白色半透明。
+/* 云朵本体：白色，八成不透明（原来是不透明白，用户要求降到原来的 80%）。
    注意 backdrop-filter 在 Electron 透明窗口上模糊不了窗口外的桌面，
-   所以「半透」只能靠调不透明度，太低字就浮了，0.86 是可读与透的折中 */
+   所以「半透」只能靠调不透明度，再低字就开始浮了 */
 .cloud-path {
-  fill: #ffffff;
+  fill: rgba(255, 255, 255, 0.8);
   stroke: rgba(120, 96, 72, 0.22);
   stroke-width: 1.6;
   stroke-linejoin: round;
@@ -114,7 +114,7 @@ body[data-below="1"] .cloud-dot {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: #ffffff;
+  background: rgba(255, 255, 255, 0.8);
   box-shadow: inset 0 0 0 1.4px rgba(120, 96, 72, 0.22);
   z-index: 1;
   pointer-events: none;
