@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { app } = require('electron');
+const { dataDir } = require('./paths');
 
 // 日志只追加不清理会一直变大，超过这个大小就轮转一代（旧的留成 debug.log.1，只留一代）
 const MAX_LOG_BYTES = 1024 * 1024;
@@ -17,8 +17,7 @@ function dbg(...args) {
     .map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a)))
     .join(' ')}\n`;
   try {
-    const base = app.isPackaged ? app.getPath('userData') : path.join(app.getAppPath(), '.data');
-    fs.mkdirSync(base, { recursive: true });
+    const base = dataDir();
     const file = path.join(base, 'debug.log');
     try {
       if (shouldRotate(fs.statSync(file).size)) fs.renameSync(file, `${file}.1`);

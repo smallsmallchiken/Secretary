@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const config = require('../config');
 const llm = require('../llm');
 const { dbg } = require('../debug');
+const { dataDir } = require('../paths');
 const { OneBotClient } = require('./client');
 
 /**
@@ -170,12 +171,7 @@ let state = null;
 
 function stateFile() {
   if (statePath) return statePath;
-  const { app } = require('electron');
-  const base = app.isPackaged
-    ? app.getPath('userData')
-    : path.join(app.getAppPath(), '.data');
-  fs.mkdirSync(base, { recursive: true });
-  statePath = path.join(base, 'qq-state.json');
+  statePath = path.join(dataDir(), 'qq-state.json');
   return statePath;
 }
 
@@ -367,9 +363,7 @@ let memeCatalog = null; // { seq, items: [{ name, hash, desc, addedAt }] }
 
 function memeDir() {
   if (memeDirCache) return memeDirCache;
-  const { app } = require('electron');
-  const base = app.isPackaged ? app.getPath('userData') : path.join(app.getAppPath(), '.data');
-  memeDirCache = path.join(base, 'memes');
+  memeDirCache = path.join(dataDir(), 'memes');
   fs.mkdirSync(memeDirCache, { recursive: true });
   return memeDirCache;
 }

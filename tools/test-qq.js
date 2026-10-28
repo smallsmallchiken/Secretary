@@ -12,10 +12,16 @@
 
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const Module = require('module');
 
 const ROOT = path.join(__dirname, '..');
 const STUB = path.join(__dirname, 'electron-stub.js');
+
+// 数据目录整体指到临时目录：配置 / 状态 / 日志 / 表情库都不会写到线上 .data。
+// 之前直接改真实 config.json，正在值守的机器人会立刻读到测试用的假 baseUrl 而回复全挂。
+process.env.PET_DATA_DIR = path.join(os.tmpdir(), `secretary-qq-test-${process.pid}`);
+fs.rmSync(process.env.PET_DATA_DIR, { recursive: true, force: true });
 
 const originalResolve = Module._resolveFilename;
 Module._resolveFilename = function (request, ...rest) {
@@ -101,8 +107,8 @@ check('白名单未命中', _internals.matchWhitelist(cfgStub, { user_id: 99999 
 
 console.log('== 桩 NapCat 端到端 ==');
 
-// 备份并清空 qq 相关持久化，测试不污染真实状态
-const DATA_DIR = path.join(ROOT, '.data');
+// 全流程都在临时数据目录里跑（见文件头的 PET_DATA_DIR），不会污染真实状态
+const DATA_DIR = process.env.PET_DATA_DIR;
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const STATE_FILE = path.join(DATA_DIR, 'qq-state.json');
 const configBackup = fs.existsSync(CONFIG_FILE) ? fs.readFileSync(CONFIG_FILE, 'utf8') : null;

@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { app } = require('electron');
+const { dataDir } = require('./paths');
 
 /**
  * 配置持久化。
@@ -76,10 +76,7 @@ let configPath = null;
 
 function resolveConfigPath() {
   if (configPath) return configPath;
-  const base = app.isPackaged
-    ? app.getPath('userData')
-    : path.join(app.getAppPath(), '.data');
-  fs.mkdirSync(base, { recursive: true });
+  const base = dataDir();
   configPath = path.join(base, 'config.json');
   return configPath;
 }
