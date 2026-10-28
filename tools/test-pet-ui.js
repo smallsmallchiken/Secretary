@@ -255,11 +255,64 @@ function checkMoveKeepsSize() {
   Module._resolveFilename = originalResolve;
 }
 
+/* ============ 第 4 组：尺寸兜底 snapPetSize ============ */
+
+/**
+ * 光靠 movePet 不够——show/hide、跨屏、系统缩放变化这些路径不经过它，
+ * 桌宠照样会被改大。所以窗口尺寸一变就要把它钉回去（windows.js 里挂在
+ * 'resize' 事件上）。这里验 snapPetSize 本身的行为：
+ *   - 被改大 -> 钉回目标尺寸
+ *   - 只差 1px（125% 缩放下的稳态误差）-> 不动，否则会和 resize 事件死循环
+ */
+function checkSnapPetSize() {
+  console.log('\n[4] 主进程：snapPetSize 把尺寸钉回去');
+
+  const Module = require('module');
+  const STUB = path.join(__dirname, 'electron-stub.js');
+  const originalResolve = Module._resolveFilename;
+  Module._resolveFilename = function (request, ...rest) {
+    if (request === 'electron') return STUB;
+    return originalResolve.call(this, request, ...rest);
+  };
+
+  const windows = require(path.join(ROOT, 'src/main/windows.js'));
+  const win = windows.createPetWindow();
+  const target = windows.sizeForScale(windows.petScale());
+
+  // 被改大：钉回目标尺寸
+  win.setBounds({ x: 200, y: 200, width: target.width + 240, height: target.height + 180 });
+  const restored = windows.snapPetSize();
+  const after = win.getBounds();
+  check('被改大后 snapPetSize 会钉回目标尺寸', restored === true, `snapPetSize 返回 ${restored}`);
+  check(
+    '钉回后尺寸等于目标',
+    after.width === target.width && after.height === target.height,
+    `${after.width}x${after.height}，期望 ${target.width}x${target.height}`
+  );
+  check('钉回时不改位置', after.x === 200 && after.y === 200, `位置 ${after.x},${after.y}`);
+
+  // 稳态 1px 误差：不能反复触发 setBounds，否则和 resize 事件互相打死循环
+  win.setBounds({ x: 200, y: 200, width: target.width + 1, height: target.height + 1 });
+  const noopSnap = windows.snapPetSize();
+  check('只差 1px 时不折腾（否则 resize 事件死循环）', noopSnap === false, `snapPetSize 返回 ${noopSnap}`);
+
+  // 事件确实挂上了（替身里 on() 是空实现，只能回到源码上断言）
+  const src = fs.readFileSync(path.join(ROOT, 'src/main/windows.js'), 'utf8');
+  check(
+    "petWin 上挂了 resize -> snapPetSize",
+    /petWin\.on\(\s*'resize'\s*,\s*snapPetSize\s*\)/.test(src),
+    'windows.js 里找不到 resize 监听'
+  );
+
+  Module._resolveFilename = originalResolve;
+}
+
 /* ==================== 入口 ==================== */
 
 checkCss();
 checkDrag();
 checkMoveKeepsSize();
+checkSnapPetSize();
 
 console.log(`\n桌宠 UI 自检：${passCount} 通过 / ${failCount} 失败`);
 process.exit(failCount ? 1 : 0);

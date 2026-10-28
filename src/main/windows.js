@@ -59,6 +59,38 @@ function sizeForScale(scale) {
 }
 
 /**
+ * 把桌宠尺寸钉回 config 里的目标值。
+ *
+ * 为什么需要这个兜底：Windows 上以非 100% 缩放（本机 125%）移动透明无边框窗口时，
+ * 每次移动都要做一次 DIP↔物理像素取整，误差逐次累加，桌宠会越拖越大。
+ * 实测 150 次移动：只改 x 时 183x199 → 332x196；x、y 都改（真实拖动）时 → 333x345。
+ * 一旦窗口变高，渲染器里 scale = min(w/192, h/208) 跟着变大，狗就真的长大了。
+ *
+ * movePet() 每次移动都写回目标尺寸，已经挡住了常规路径；
+ * 但 show/hide、跨屏、系统缩放变化这些不经过 movePet 的地方仍会漏，
+ * 所以这里在窗口尺寸一变就钉回去。
+ *
+ * 容差 2px 是必须的：125% 缩放下 setBounds(180) 读回来是 181，稳态就有 1px 误差；
+ * 不留容差会和 resize 事件互相触发，死循环。
+ */
+const SIZE_TOLERANCE = 2;
+
+function snapPetSize() {
+  const win = petWin && !petWin.isDestroyed() ? petWin : null;
+  if (!win) return false;
+  const b = win.getBounds();
+  const { width, height } = sizeForScale(petScale());
+  if (Math.abs(b.width - width) <= SIZE_TOLERANCE && Math.abs(b.height - height) <= SIZE_TOLERANCE) {
+    return false;
+  }
+  win.setBounds({ x: b.x, y: b.y, width, height });
+  require('../core/debug').dbg(
+    `[snap] 尺寸被改动 ${b.width}x${b.height} -> ${width}x${height}，已钉回`
+  );
+  return true;
+}
+
+/**
  * 移动桌宠窗口。
  *
  * 不能只用 setPosition：Windows 上以非 100% 缩放移动透明窗口时，
@@ -143,6 +175,9 @@ function createPetWindow() {
   petWin.on('closed', () => {
     petWin = null;
   });
+
+  // 桌宠尺寸恒定：任何不经过 movePet 的路径把尺寸改了，这里立刻钉回去
+  petWin.on('resize', snapPetSize);
 
   return petWin;
 }
@@ -262,7 +297,8 @@ function positionBubble() {
 
   x = Math.round(x);
   y = Math.round(y);
-  bubbleWin.setPosition(x, y);
+  // 同 movePet：setPosition 在非 100% 缩放下会让窗口越移越大，把尺寸一起写回去
+  bubbleWin.setBounds({ x, y, width: bw, height: bh });
   lastBubbleLayout = { side, below, x, y };
   if (bubbleReady) bubbleWin.webContents.send('bubble:layout', { side, below });
 }
@@ -546,6 +582,7 @@ module.exports = {
   applyPetScale,
   stepPetScale,
   sizeForScale,
+  snapPetSize,
   movePet,
   showContextMenu,
   hideContextMenu,
