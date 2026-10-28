@@ -198,10 +198,68 @@ function checkDrag() {
   sceneRightButton();
 }
 
+/* ============ 第 3 组：移动桌宠不许改尺寸（主进程） ============ */
+
+/**
+ * 真实症状：Windows 上以 125% 缩放拖动 / 漫游桌宠时，窗口每移动一次就大一点
+ * （实测：漫游 150 秒从 954x548 长到 1462x732，用户那只长到 1082x548）。
+ * 所以桌宠只能通过 windows.movePet 移动——它每次都会把目标尺寸一起写回去。
+ *
+ * 替身里 setPosition 会模拟这个漂移（每次 +1px），setBounds 则精确写入，
+ * 也就是 movePet 的修复思路：目标尺寸来自 config，不来自已经漂了的当前 bounds。
+ */
+function checkMoveKeepsSize() {
+  console.log('\n[3] 主进程：移动桌宠不改尺寸');
+
+  const Module = require('module');
+  const STUB = path.join(__dirname, 'electron-stub.js');
+  const originalResolve = Module._resolveFilename;
+  Module._resolveFilename = function (request, ...rest) {
+    if (request === 'electron') return STUB;
+    return originalResolve.call(this, request, ...rest);
+  };
+
+  const electron = require(STUB);
+  const windows = require(path.join(ROOT, 'src/main/windows.js'));
+  const win = windows.createPetWindow();
+  const before = win.getBounds();
+
+  // 先证明模拟出来的漂移确实是这个问题：裸 setPosition 连续移动会越来越大
+  electron.BrowserWindow.simulateMoveDrift = true;
+  for (let i = 0; i < 200; i += 1) win.setPosition(100 + i, 200);
+  const drifted = win.getBounds();
+  check(
+    '裸 setPosition 连移 200 次会变大（复现真实症状）',
+    drifted.width > before.width && drifted.height > before.height,
+    `尺寸 ${before.width}x${before.height} -> ${drifted.width}x${drifted.height}`
+  );
+
+  // movePet：每次移动都把目标尺寸写回去，200 次之后尺寸必须原样
+  for (let i = 0; i < 200; i += 1) windows.movePet(100 + i, 200);
+  const after = win.getBounds();
+  check('movePet 移动 200 次后宽度不变', after.width === before.width, `width ${before.width} -> ${after.width}`);
+  check('movePet 移动 200 次后高度不变', after.height === before.height, `height ${before.height} -> ${after.height}`);
+  check('movePet 确实移动了窗口', after.x === 299 && after.y === 200, `位置 ${after.x},${after.y}`);
+
+  // 已经被漂大的窗口，movePet 要能把它修回来
+  win.setBounds({ x: 500, y: 500, width: before.width + 300, height: before.height + 200 });
+  windows.movePet(500, 500);
+  const healed = win.getBounds();
+  check(
+    '已经漂大的窗口，movePet 会修回目标尺寸',
+    healed.width === before.width && healed.height === before.height,
+    `尺寸 ${healed.width}x${healed.height}，期望 ${before.width}x${before.height}`
+  );
+
+  electron.BrowserWindow.simulateMoveDrift = false;
+  Module._resolveFilename = originalResolve;
+}
+
 /* ==================== 入口 ==================== */
 
 checkCss();
 checkDrag();
+checkMoveKeepsSize();
 
 console.log(`\n桌宠 UI 自检：${passCount} 通过 / ${failCount} 失败`);
 process.exit(failCount ? 1 : 0);

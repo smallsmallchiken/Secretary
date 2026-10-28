@@ -124,9 +124,10 @@ function registerIpc() {
     const win = windows.getPetWindow();
     if (!win || !dragState) return;
     const c = screen.getCursorScreenPoint();
-    win.setPosition(
-      Math.round(dragState.bounds.x + (c.x - dragState.cursor.x)),
-      Math.round(dragState.bounds.y + (c.y - dragState.cursor.y))
+    // 走 movePet：setPosition 在非 100% 缩放下会让桌宠越拖越大
+    windows.movePet(
+      dragState.bounds.x + (c.x - dragState.cursor.x),
+      dragState.bounds.y + (c.y - dragState.cursor.y)
     );
     windows.positionBubble();
   });
@@ -204,7 +205,7 @@ function registerIpc() {
       const win = windows.getPetWindow();
       if (win) {
         const pos = windows.dockPosition(win);
-        win.setPosition(pos.x, pos.y);
+        windows.movePet(pos.x, pos.y);
       }
       windows.sendToPet('pet:config', next.pet);
     }

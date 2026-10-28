@@ -58,6 +58,27 @@ function sizeForScale(scale) {
   };
 }
 
+/**
+ * 移动桌宠窗口。
+ *
+ * 不能只用 setPosition：Windows 上以非 100% 缩放移动透明窗口时，
+ * 每次移动都会把尺寸做一次 DIP↔物理像素取整，小数部分逐次累加，
+ * 桌宠会越移越大（实测：漫游 150 秒从 954x548 长到 1462x732）。
+ * 这里每次移动都把「目标尺寸」一起写回去，漂移就不会累积——
+ * 目标尺寸来自 config，不来自已经漂了的当前 bounds。
+ */
+function movePet(x, y) {
+  const win = petWin && !petWin.isDestroyed() ? petWin : null;
+  if (!win) return false;
+  const nx = Math.round(x);
+  const ny = Math.round(y);
+  const { width, height } = sizeForScale(petScale());
+  const b = win.getBounds();
+  if (b.x === nx && b.y === ny && b.width === width && b.height === height) return false;
+  win.setBounds({ x: nx, y: ny, width, height });
+  return true;
+}
+
 function preloadPath(name) {
   return path.join(__dirname, '..', 'preload', name);
 }
@@ -103,7 +124,7 @@ function createPetWindow() {
   petWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   const pos = dockPosition(petWin);
-  petWin.setPosition(pos.x, pos.y);
+  movePet(pos.x, pos.y);
 
   petWin.loadFile(path.join(__dirname, '..', 'renderer', 'pet', 'index.html'));
 
@@ -525,6 +546,7 @@ module.exports = {
   applyPetScale,
   stepPetScale,
   sizeForScale,
+  movePet,
   showContextMenu,
   hideContextMenu,
   resizeContextMenu,

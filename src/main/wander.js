@@ -125,7 +125,8 @@ function step() {
     windows.sendToPet('pet:wander', { active: true, dir: 'left' });
   }
 
-  win.setPosition(Math.round(nx), Math.round(b.y));
+  // 走 movePet 而不是 setPosition：后者在非 100% 缩放下会让窗口越移越大
+  windows.movePet(nx, b.y);
 }
 
 function stop() {

@@ -24,15 +24,19 @@ Module._resolveFilename = function (request, ...rest) {
 const state = { x: 900, y: 800, visible: true };
 const moves = [];
 const petStates = [];
+// 桌宠窗口只允许通过 windows.movePet 移动：直接 setPosition 在非 100% 缩放下
+// 会让窗口越移越大，这条计数盯着谁又绕过了 movePet。
+let rawMoves = 0;
 
 const fakeWin = {
   isDestroyed: () => false,
   isVisible: () => state.visible,
   getBounds: () => ({ x: state.x, y: state.y, width: 180, height: 196 }),
-  setPosition: (x, y) => {
-    state.x = x;
-    state.y = y;
-    moves.push(x);
+  setPosition: () => {
+    rawMoves += 1;
+  },
+  setBounds: () => {
+    rawMoves += 1;
   }
 };
 
@@ -45,7 +49,12 @@ require.cache[windowsPath] = {
     getPetWindow: () => fakeWin,
     getBubbleWindow: () => null,
     sendToPet: (channel, payload) => petStates.push(payload),
-    dockPosition: () => ({ x: 900, y: 800 })
+    dockPosition: () => ({ x: 900, y: 800 }),
+    movePet: (x, y) => {
+      state.x = x;
+      state.y = y;
+      moves.push(x);
+    }
   }
 };
 
@@ -68,6 +77,11 @@ setTimeout(() => {
 
   if (moves.length < 5) {
     console.log('异常：几乎没有移动');
+    process.exit(1);
+  }
+  if (rawMoves > 0) {
+    console.log(`异常：漫游绕过了 movePet，直接动窗口 ${rawMoves} 次`);
+    console.log('（setPosition 在非 100% 缩放下会让桌宠越走越大）');
     process.exit(1);
   }
   console.log('漫游逻辑正常 ✓');

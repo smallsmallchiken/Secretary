@@ -62,6 +62,14 @@ class BrowserWindow {
   setPosition(x, y) {
     this._bounds.x = x;
     this._bounds.y = y;
+    // 模拟真实平台行为：Windows 上以非 100% 缩放移动透明窗口时，
+    // 尺寸会做一次 DIP↔物理像素取整，小数部分逐次累加，窗口越移越大
+    // （实测：漫游 150 秒从 954x548 长到 1462x732）。
+    // 默认关闭，只有 test-pet-ui.js 的「移动不许改尺寸」用例打开。
+    if (BrowserWindow.simulateMoveDrift) {
+      this._bounds.width += 1;
+      this._bounds.height += 1;
+    }
   }
   setBounds(b) {
     this._bounds = { ...this._bounds, ...b };
@@ -73,6 +81,9 @@ class BrowserWindow {
     return [this._bounds.width, this._bounds.height];
   }
 }
+
+/** 打开后 setPosition 会模拟真实平台的尺寸漂移（见上面注释） */
+BrowserWindow.simulateMoveDrift = false;
 
 let clipText = '';
 const clipboard = {
