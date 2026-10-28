@@ -67,7 +67,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('不存在的 pid 判定为死', it.alive(999999) === false);
   check('pid 为 null 判定为死', it.alive(null) === false);
 
-  console.log('4) 状态探测（会问一次系统进程表，约 1s）');
+  console.log('4) 「应该开着」标记（看门狗据此决定要不要自愈）');
+  it.setWant(false);
+  check('初始为不想开', it.isWanted() === false);
+  it.setWant(true);
+  check('置位后为想开', it.isWanted() === true);
+  it.setWant(false);
+  check('清除后为不想开', it.isWanted() === false);
+
+  console.log('5) 状态探测（会问一次系统进程表，约 1s）');
   const t0 = Date.now();
   const st = await wx.refresh(true);
   const cost = Date.now() - t0;
@@ -75,14 +83,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('探测耗时 < 8s', cost < 8000, `${cost}ms`);
   console.log(`       现状：running=${st.running} pid=${st.pid} 私聊全回=${st.replyToAll} 群模式=${st.groupMode}`);
   check('同步 status 与 refresh 一致', wx.status().running === st.running);
+  // refresh 看到进程活着时会自动把标记补上，否则看门狗不知道要不要自愈
+  check('运行中会自动认回标记', st.running ? it.isWanted() === true : true);
 
   if (process.argv.includes('--live')) {
-    console.log('5) 真实 stop -> start（--live）');
+    console.log('6) 真实 stop -> start（--live）');
     const before = st;
     await wx.stop(true);
     await sleep(800);
     const stopped = await wx.refresh(true);
     check('stop 之后进程不在了', stopped.running === false, `pid=${stopped.pid}`);
+    check('stop 会清掉标记', it.isWanted() === false);
 
     await wx.start();
     await sleep(1500);
@@ -92,10 +103,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     console.log(`       原来是 pid=${before.pid}，现在是 pid=${started.pid}`);
     if (!started.running) {
       console.log('       ⚠ 服务没起来，请手工执行：');
-      console.log('         wechat-bot/py312/python.exe -u wechat-bot/bot_db.py watch --live');
+      console.log('         wechat-bot/py312/pythonw.exe -u wechat-bot/bot_db.py watch --live');
     }
   } else {
-    console.log('5) 跳过真实启停（加 --live 才跑）');
+    console.log('6) 跳过真实启停（加 --live 才跑）');
   }
 
   console.log(failed ? `\n${failed} 项失败` : '\n全部通过');

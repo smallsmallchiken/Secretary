@@ -415,8 +415,14 @@ app.whenReady().then(() => {
     .refresh(true)
     .then((st) => dbg('[wx] 初始状态:', JSON.stringify(st)))
     .catch((err) => dbg('[wx] 初始状态失败:', err.message));
-  // 右键菜单要同步返回，只能用缓存，所以后台每 5 秒刷一次
-  const wxTimer = setInterval(() => wxbot.refresh().catch(() => {}), 5000);
+  // 右键菜单要同步返回，只能用缓存，所以后台每 5 秒刷一次；顺便当看门狗：
+  // 标志是「用户本来要它开着」却查不到进程，就自动重新拉起（防止值守悄悄掉线）
+  const wxTimer = setInterval(() => {
+    wxbot
+      .refresh()
+      .then(() => wxbot.ensureRunning())
+      .catch(() => {});
+  }, 5000);
   if (wxTimer.unref) wxTimer.unref();
 
   // 恢复未到期的提醒

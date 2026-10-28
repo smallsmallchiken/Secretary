@@ -21,11 +21,16 @@ const { dataDir } = require('../paths');
 const ROOT = path.resolve(__dirname, '../../..');
 const WX_DIR = path.join(ROOT, 'wechat-bot');
 const PY = path.join(WX_DIR, 'py312', 'python.exe');
+// pythonw 是 GUI 子系统：Windows 不会给它分配控制台，也就收不到 Ctrl+C。
+// 值守进程被杀的事故就是 cmd 那个隐藏控制台连坐导致的，见 startViaWmi 的注释。
+const PYW = path.join(WX_DIR, 'py312', 'pythonw.exe');
 const SCRIPT = path.join(WX_DIR, 'bot_db.py');
 const CONF = path.join(WX_DIR, 'bot-db-config.json');
 const LOG = path.join(WX_DIR, 'live.log');
 
 const DISCOVER_INTERVAL_MS = 30000;
+const RESTART_COOLDOWN_MS = 15000;
+const MAX_FAIL_STREAK = 5;
 
 /** 缓存给同步调用方（右键菜单）用，避免菜单为了问一句话卡 500ms。 */
 let cached = {
@@ -40,6 +45,9 @@ let cached = {
 let lastDiscoverAt = null;
 let refreshing = null;
 let notify = null;
+let lastStartAt = 0;
+let failStreak = 0;
+let ensuring = null;
 
 function setNotifier(fn) {
   notify = typeof fn === 'function' ? fn : null;
@@ -103,6 +111,37 @@ function clearPid() {
     fs.unlinkSync(pidFile());
   } catch {
     /* 没文件就没事 */
+  }
+}
+
+/**
+ * 「用户想要它开着」的标记。
+ *
+ * pid 文件只能说明现在有没有进程，说明不了**该不该**有进程。看门狗要自动重启，
+ * 就必须能区分两种「没在跑」：用户主动关的（别管）、自己掉线的（要拉起来）。
+ */
+function wantFile() {
+  try {
+    return path.join(dataDir(), 'wechat-bot.want');
+  } catch {
+    return path.join(WX_DIR, 'bot.want');
+  }
+}
+
+function setWant(on) {
+  try {
+    if (on) fs.writeFileSync(wantFile(), String(Date.now()), 'utf8');
+    else fs.unlinkSync(wantFile());
+  } catch (err) {
+    if (err.code !== 'ENOENT') dbg('[wx] 写 want 标记失败：', err.message);
+  }
+}
+
+function isWanted() {
+  try {
+    return fs.existsSync(wantFile());
+  } catch {
+    return false;
   }
 }
 
@@ -170,6 +209,9 @@ function refresh(force = false) {
       whitelistCount: Array.isArray(cfg.whitelist) ? cfg.whitelist.length : 0,
       persona: cfg.persona || ''
     };
+    // 认回「应该开着」的意愿：桌宠重启、或者值守是别人手工起的，
+    // 只要看到进程活着就把标记补上，看门狗之后才会接着自愈。
+    if (pid && !isWanted()) setWant(true);
     return cached;
   })().finally(() => {
     refreshing = null;
@@ -194,13 +236,20 @@ function psQuote(s) {
  * 就被一起收走 —— 实测确认过：关掉主进程后 python 立刻没了。
  * 走 Win32_Process.Create，父级是 WmiPrvSE，跟桌宠彻底脱钩，重启桌宠也不影响值守。
  *
- * 返回新进程 pid（这里是 cmd 的 pid，真正的 python pid 靠 discoverPid 再认一次）。
+ * **别再用 `cmd /c "... >> live.log"` 包一层。** 那样 WMI 创建的是 cmd，
+ * cmd 是控制台程序、会拿到一个隐藏控制台；一旦这个控制台被 Ctrl+C 广播波及，
+ * cmd 和它下面的 python 一起死，live.log 里只留下一个 `^C`（实际踩了两次：
+ * 20:47、20:52 各掉一次线）。现在改成 pythonw.exe（GUI 子系统，没有控制台），
+ * 日志由 bot_db.py 的 ensure_output() 自己写文件，整条链都不碰控制台。
+ *
+ * 返回新进程 pid。
  */
 function startViaWmi() {
   return new Promise((resolve) => {
-    // cmd /c 负责把输出追加进 live.log；首尾都加引号是 cmd 的怪癖，不加会把前面的引号吃掉
-    const inner = `"${PY}" -u "${SCRIPT}" watch --live >> "${LOG}" 2>&1`;
-    const cmdline = `cmd /c "${inner}"`;
+    const usePythonw = fs.existsSync(PYW);
+    const cmdline = usePythonw
+      ? `"${PYW}" -u "${SCRIPT}" watch --live`
+      : `cmd /c ""${PY}" -u "${SCRIPT}" watch --live >> "${LOG}" 2>&1"`;
     const ps =
       '$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create ' +
       `-Arguments @{ CommandLine = ${psQuote(cmdline)}; CurrentDirectory = ${psQuote(ROOT)} }; ` +
@@ -220,13 +269,16 @@ function startViaWmi() {
           dbg('[wx] WMI 启动返回异常：pid=', pidStr, 'rc=', rc);
           return resolve(null);
         }
+        dbg('[wx] 用', usePythonw ? 'pythonw（无控制台）' : 'python+cmd（回退）', '创建，pid =', pid);
         resolve(pid);
       }
     );
   });
 }
 
-async function start() {
+async function start(opts = {}) {
+  setWant(true); // 先记下「用户要它开着」，看门狗据此判断该不该自动拉起
+  lastStartAt = Date.now();
   await refresh(true);
   if (!cached.available) {
     say('微信自动回复没配好：找不到 wechat-bot/py312/python.exe 或 bot_db.py');
@@ -284,15 +336,18 @@ async function start() {
     clearPid();
     lastDiscoverAt = null;
     cached = { ...cached, running: false, pid: null };
+    failStreak += 1;
     say('微信自动回复没起来，详细报错看 wechat-bot/live.log 末尾');
     return { ok: false, message: '进程启动后立刻退出' };
   }
   cached = { ...cached, running: true, pid: realPid };
-  say('微信自动回复已开启，开始值守未读会话');
+  failStreak = 0;
+  say(opts.auto ? '微信值守掉线了，已自动重新拉起' : '微信自动回复已开启，开始值守未读会话');
   return { ok: true };
 }
 
 async function stop(silent = false) {
+  setWant(false); // 用户主动关的，看门狗别再把它拉起来
   // 杀之前重新确认一次：只杀命令行里带 bot_db.py 的进程，防止 PID 复用误杀别人
   const pid = await discoverPid();
   if (pid && alive(pid)) {
@@ -323,13 +378,41 @@ async function toggle() {
   return status();
 }
 
+/**
+ * 看门狗：掉线自动拉起。
+ *
+ * 只做「用户本来要它开着」的那部分：want 标记不存在（用户主动关的）就什么都不做。
+ * 连续失败 MAX_FAIL_STREAK 次就停手并说一声，免得环境坏了时每 15 秒弹一次气泡、
+ * 每 15 秒开一次进程。
+ */
+function ensureRunning() {
+  if (ensuring) return ensuring;
+  ensuring = (async () => {
+    if (!isWanted()) return { ok: true, skipped: 'not wanted' };
+    if (failStreak >= MAX_FAIL_STREAK) return { ok: false, skipped: 'too many failures' };
+    if (Date.now() - lastStartAt < RESTART_COOLDOWN_MS) return { ok: true, skipped: 'cooling' };
+    // 先看缓存里那个 pid 活没活，绝大多数情况这次 kill(pid,0) 就够了，不用问系统
+    if (cached.pid && alive(cached.pid)) return { ok: true, skipped: 'alive' };
+    await refresh(true);
+    if (cached.running) return { ok: true, skipped: 'alive' };
+    dbg('[wx] 看门狗发现值守进程不在了，尝试拉起');
+    return start({ auto: true });
+  })().finally(() => {
+    ensuring = null;
+  });
+  return ensuring;
+}
+
 module.exports = {
   refresh,
   status,
   start,
   stop,
   toggle,
+  ensureRunning,
   setNotifier,
   // 测试用
-  _internals: { alive, readPid, writePid, clearPid, readCfg, available, ROOT }
+  _internals: {
+    alive, readPid, writePid, clearPid, readCfg, available, isWanted, setWant, ROOT
+  }
 };
