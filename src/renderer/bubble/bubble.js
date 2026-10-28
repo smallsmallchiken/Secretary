@@ -2,7 +2,6 @@
 
 const chat = document.getElementById('chat');
 const input = document.getElementById('input');
-const btnSend = document.getElementById('btn-send');
 
 const viewChat = document.getElementById('view-chat');
 const viewSettings = document.getElementById('view-settings');
@@ -173,7 +172,6 @@ async function send(rawText) {
   if (!text || sending) return;
 
   sending = true;
-  btnSend.disabled = true;
   input.value = '';
   input.style.height = 'auto';
 
@@ -196,12 +194,9 @@ async function send(rawText) {
     pushMessage('error', err.message || '请求失败');
   } finally {
     sending = false;
-    btnSend.disabled = false;
     input.focus();
   }
 }
-
-btnSend.addEventListener('click', () => send());
 
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
