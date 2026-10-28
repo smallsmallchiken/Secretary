@@ -29,3 +29,23 @@ qq-bot/*.zip
 
 # 本地工具二进制（ffmpeg 变声用）
 tools/ffmpeg/
+
+# ---- 微信机器人（wechat-bot/，UI 自动化）----
+# 自带 Python 运行时（几十 MB，装一次即可，不入库）
+wechat-bot/py312/
+# 合成语音与临时产物
+wechat-bot/tts/
+# 运行日志 / 状态 / 调试截图
+wechat-bot/*.log
+wechat-bot/*.jsonl
+wechat-bot/bot-state.json
+wechat-bot/bot-db-state.json
+wechat-bot/_*.png
+wechat-bot/*-src.png
+wechatauto_logs/
+# 含登录账号 / 本地绝对路径的配置，不入库
+wechat-bot/bot-config.json
+wechat-bot/bot-db-config.json
+# 企业微信机器人：含 CorpID / Secret
+wecom-bot/config.json
+wecom-bot/*.log
