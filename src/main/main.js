@@ -6,6 +6,7 @@ const { app, ipcMain, shell, screen } = require('electron');
 const config = require('../core/config');
 const agent = require('../core/agent');
 const reminder = require('../core/tools/reminder');
+const qqbot = require('../core/qq/bot');
 const windows = require('./windows');
 const wander = require('./wander');
 const { createTray, refreshTray } = require('./tray');
@@ -248,10 +249,18 @@ function registerIpc() {
 
 function buildMenuItems() {
   const wanderOn = config.get('behavior.allowWander', true) !== false;
+  const qqSt = qqbot.status();
 
   return [
     { id: 'wander_toggle', label: '自己漫步', hint: wanderOn ? '开' : '关' },
     { id: 'walk', label: '自己溜达一圈' },
+    { sep: true },
+    {
+      id: 'qq_toggle',
+      label: 'QQ 自动回复',
+      hint: qqSt.running ? `值守中(${qqSt.whitelistCount}人)` : qqSt.enabled ? '已启用(未连上)' : '关',
+      danger: qqSt.running
+    },
     { sep: true },
     { id: 'chat', label: '说点什么…', hint: 'Alt+W' },
     { id: 'settings', label: '设置' },
@@ -273,6 +282,21 @@ function runMenuAction(id) {
     }
     case 'walk':
       wander.nudge();
+      break;
+    case 'qq_toggle':
+      qqbot
+        .toggle()
+        .then((st) => {
+          dbg('[qq] 菜单切换后状态:', JSON.stringify(st));
+          if (!st.running && !st.enabled) {
+            windows.showBubble();
+            windows.sendToBubble('bubble:push', {
+              role: 'assistant',
+              text: 'QQ 自动回复没开起来：白名单还是空的。把要替你回的人加进 .data/config.json 的 qq.whitelist（QQ 号和备注），再开一次。'
+            });
+          }
+        })
+        .catch((err) => dbg('[qq] 切换失败:', err.message));
       break;
     case 'chat':
       windows.toggleBubble();
@@ -310,6 +334,7 @@ function quitApp() {
   global.__quitting = true;
   try {
     wander.stop();
+    qqbot.shutdown();
   } catch {
     /* ignore */
   }
@@ -324,6 +349,12 @@ app.whenReady().then(() => {
   createTray();
   registerShortcuts();
   wander.start();
+
+  // QQ 自动回复：上次开着就恢复，收发结果通过气泡播报
+  qqbot.init((text) => {
+    windows.showBubble();
+    windows.sendToBubble('bubble:push', { role: 'assistant', text, data: { kind: 'qq' } });
+  });
 
   // 恢复未到期的提醒
   dbg('[reminder] init 读取到', reminder.list().length, '条待办');

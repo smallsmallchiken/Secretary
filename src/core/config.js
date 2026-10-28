@@ -57,7 +57,18 @@ const DEFAULT_CONFIG = {
     signature: ''
   },
   // 常用应用别名，用户可自行补充
-  appAliases: {}
+  appAliases: {},
+  // QQ 自动回复（连 NapCat 协议端）。白名单为空时即使开关打开也不会回复任何人
+  qq: {
+    enabled: false,
+    wsUrl: 'ws://127.0.0.1:3001',
+    token: '',
+    whitelist: [],
+    perChatIntervalSeconds: 20,
+    maxConsecutive: 3,
+    maxPerHour: 20,
+    dedupeWindowSeconds: 60
+  }
 };
 
 let cache = null;
