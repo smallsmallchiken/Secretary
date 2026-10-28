@@ -21,10 +21,11 @@ const { OneBotClient } = require('./client');
  * 状态落盘 .data/qq-state.json，重启不丢「已处理到哪条」。
  */
 
-const SYSTEM_PROMPT = `你在替本人回复 QQ 私聊消息。要求：
+const SYSTEM_PROMPT = `你在替本人回复 QQ 消息（可能是私聊，也可能是群聊）。要求：
 - 用本人第一人称，口语化，像真人随手打的，不要书面语
 - 短，通常一到两句话，不要长篇大论
 - 不要用「您好」「感谢您的来信」这类客服腔
+- 群聊里更是随手接话的口气，不要正式，不要主动喊人
 - 不确定的事不要替本人承诺，说「我看一下」「回头跟你说」
 - 只输出要发的那句话本身，不要任何解释、引号或前缀
 - 对方消息如果看起来是广告、诈骗、群发，直接不回复（输出 [SKIP]）`;
@@ -43,7 +44,7 @@ function defaultConfig() {
     enabled: false,
     wsUrl: 'ws://127.0.0.1:3001',
     token: '',
-    // 白名单：[{ qq: 123456, name: '备注' }]。空数组 = 不回复任何人
+    // 白名单：{ qq, name } 私聊；{ group, name } 群聊。空数组 = 谁都不回
     whitelist: [],
     // 护栏参数
     perChatIntervalSeconds: 20,
@@ -56,10 +57,6 @@ function defaultConfig() {
 function getCfg() {
   const saved = config.get('qq', {}) || {};
   return { ...defaultConfig(), ...saved };
-}
-
-function whitelistSet(cfg) {
-  return new Set((cfg.whitelist || []).map((x) => String(x.qq)).filter(Boolean));
 }
 
 /* ------------------------------------------------------------------ */
@@ -190,7 +187,7 @@ function cleanReply(text) {
   return t || null;
 }
 
-async function generateReply(historyTexts, incoming) {
+async function generateReply(historyTexts, incoming, speaker) {
   const llmCfg = config.getLLM();
   if (!llmCfg || !llmCfg.enabled || !llmCfg.apiKey) {
     return [null, '没有配置模型，无法自动生成回复'];
@@ -199,7 +196,8 @@ async function generateReply(historyTexts, incoming) {
   if (historyTexts && historyTexts.length) {
     user.push('最近的聊天记录：\n' + historyTexts.join('\n'));
   }
-  user.push(`对方刚发来的消息：${incoming}\n\n请直接给出要回复的那句话。`);
+  if (speaker) user.push(`发言人：${speaker}`);
+  user.push(`${speaker ? '群里有人' : '对方'}刚发来的消息：${incoming}\n\n请直接给出要回复的那句话。`);
 
   const msg = await llm.chat({
     messages: [
@@ -301,12 +299,14 @@ async function toggle() {
   await start();
   return status();
 }
-/** 关键字白名单 + 只收私聊好友消息。返回命中的备注名或 null。 */
+/** 关键字白名单 + 只收私聊好友/白名单群消息。返回命中的备注名或 null。
+ *  白名单条目两种形态：{ qq, name } 私聊；{ group, name } 群聊。 */
 function matchWhitelist(cfg, event) {
-  const want = whitelistSet(cfg);
-  if (!want.has(String(event.user_id))) return null;
-  const entry = (cfg.whitelist || []).find((x) => String(x.qq) === String(event.user_id));
-  return (entry && entry.name) || String(event.user_id);
+  const isGroup = event.message_type === 'group';
+  const key = isGroup ? String(event.group_id) : String(event.user_id);
+  const field = isGroup ? 'group' : 'qq';
+  const entry = (cfg.whitelist || []).find((x) => String(x[field]) === key);
+  return entry ? entry.name || key : null;
 }
 
 async function handleEvent(event) {
@@ -321,17 +321,25 @@ async function onMessage(event) {
   const cfg = getCfg();
   if (!cfg.enabled) return;
 
-  // 只处理私聊。群聊/讨论组/频道一律忽略
-  if (event.post_type !== 'message' || event.message_type !== 'private') return;
+  // 只处理私聊和群聊。讨论组/频道一律忽略
+  if (event.post_type !== 'message') return;
+  if (event.message_type !== 'private' && event.message_type !== 'group') return;
   // 好友私聊才回；sub_type 为 group 的临时会话不回
-  if (event.sub_type && event.sub_type !== 'friend') {
+  if (event.message_type === 'private' && event.sub_type && event.sub_type !== 'friend') {
     dbg('[qq] 忽略非好友私聊 sub_type=', event.sub_type);
+    return;
+  }
+  // 匿名群消息不回（不知道是谁，风险大）
+  if (event.anonymous) {
+    dbg('[qq] 忽略匿名群消息');
     return;
   }
   // 自己发的（多端同步等）不回
   if (client && client.selfId && String(event.user_id) === String(client.selfId)) return;
 
-  const qq = String(event.user_id);
+  const isGroup = event.message_type === 'group';
+  const targetId = isGroup ? event.group_id : event.user_id;
+  const qq = String(targetId); // 护栏状态键：群聊按群、私聊按人
   const name = matchWhitelist(cfg, event);
   if (!name) {
     dbg('[qq]', qq, '不在白名单，忽略');
@@ -364,12 +372,15 @@ async function onMessage(event) {
   }
 
   const incoming = String(text).slice(0, 500);
-  say(`QQ 收到 ${name} 的消息：「${incoming.slice(0, 40)}${incoming.length > 40 ? '…' : ''}」，正在想怎么回`);
+  const speaker = isGroup
+    ? String((event.sender && (event.sender.card || event.sender.nickname)) || '').slice(0, 30)
+    : '';
+  say(`QQ 收到 ${name}${speaker ? ` 里 ${speaker}` : ''} 的消息：「${incoming.slice(0, 40)}${incoming.length > 40 ? '…' : ''}」，正在想怎么回`);
 
   const ctx = (c.ctx || []).slice(-CTX_PER_CHAT);
   let reply;
   try {
-    const [gen, err] = await generateReply(ctx, incoming);
+    const [gen, err] = await generateReply(ctx, incoming, speaker);
     if (!gen) {
       dbg('[qq]', name, '生成放弃：', err || '模型输出为空/标记跳过');
       return;
@@ -386,7 +397,9 @@ async function onMessage(event) {
   }
 
   try {
-    await client.sendPrivateText(event.user_id, reply);
+    await (isGroup
+      ? client.sendGroupText(targetId, reply)
+      : client.sendPrivateText(targetId, reply));
   } catch (err) {
     dbg('[qq]', name, '发送失败：', err.message);
     say(`QQ 回复 ${name} 发送失败：${err.message}`);

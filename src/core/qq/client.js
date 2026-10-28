@@ -189,6 +189,14 @@ class OneBotClient {
     });
   }
 
+  /** 便捷方法：发群聊文本消息 */
+  sendGroupText(groupId, text) {
+    return this.callApi('send_group_msg', {
+      group_id: groupId,
+      message: [{ type: 'text', data: { text } }]
+    });
+  }
+
   /** 登录信息（QQ 号 + 昵称） */
   getLoginInfo() {
     return this.callApi('get_login_info');
