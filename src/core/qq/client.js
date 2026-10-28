@@ -197,6 +197,14 @@ class OneBotClient {
     });
   }
 
+  /** 发送本地语音文件（mp3 等由 NapCat 自动转码为 QQ 语音） */
+  sendRecord(isGroup, targetId, filePath) {
+    return this.callApi(isGroup ? 'send_group_msg' : 'send_private_msg', {
+      [isGroup ? 'group_id' : 'user_id']: targetId,
+      message: [{ type: 'record', data: { file: `file:///${String(filePath).replace(/\\/g, '/')}` } }]
+    });
+  }
+
   /** 登录信息（QQ 号 + 昵称） */
   getLoginInfo() {
     return this.callApi('get_login_info');

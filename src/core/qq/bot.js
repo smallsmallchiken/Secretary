@@ -26,6 +26,8 @@ const SYSTEM_PROMPT = `你在替本人回复 QQ 消息（可能是私聊，也�
 - 短，通常一到两句话，不要长篇大论
 - 不要用「您好」「感谢您的来信」这类客服腔
 - 群聊里更是随手接话的口气，不要正式，不要主动喊人
+- 对方发的图片/表情包可能直接附在消息里，或以（附图：…）（发了个「xx」表情）标注，自然接话即可
+- 对方发的语音会转成文字给你，就当对方打了这段字
 - 不确定的事不要替本人承诺，说「我看一下」「回头跟你说」
 - 只输出要发的那句话本身，不要任何解释、引号或前缀
 - 对方消息如果看起来是广告、诈骗、群发，直接不回复（输出 [SKIP]）`;
@@ -34,11 +36,11 @@ const REPLY_MAX_CHARS = 120;
 const CTX_PER_CHAT = 6; // 每会话保留的上下文条数（一问一答算两条）
 const CLEAN_PREFIX = ['回复：', '回复:', '可以这样回：'];
 
-// 图片/表情包识别用的视觉模型（SiliconFlow 的 Qwen3-VL，走同一个 API Key）
-const VISION_MODEL_DEFAULT = 'Qwen/Qwen3-VL-8B-Instruct';
-const VISION_SYSTEM = `你是帮人看 QQ 聊天图片的助手。对发来的图片或表情包，用一句话（30 字以内）说明内容和你感受到的情绪。
-如果是表情包/梗图，直接说明它表达的态度（比如「无语」「哈哈大笑」「委屈巴巴」「点赞认可」）。
-如果是截图或照片，简述关键内容。只输出这一句话本身。`;
+// 图片/语音相关模型与音色（SiliconFlow，同一个 API Key）
+const VISION_MODEL_DEFAULT = 'Qwen/Qwen3-VL-30B-A3B-Instruct'; // MoE，识别好且快
+const TTS_MODEL_DEFAULT = 'FunAudioLLM/CosyVoice2-0.5B';
+const TTS_VOICE_DEFAULT = 'FunAudioLLM/CosyVoice2-0.5B:alex';
+const ASR_MODEL_DEFAULT = 'FunAudioLLM/SenseVoiceSmall';
 
 // QQ 经典小黄脸 id -> 含义（常用的前 30 个）
 const FACE_NAMES = {
@@ -65,8 +67,12 @@ function defaultConfig() {
     maxConsecutive: 3,
     maxPerHour: 20,
     dedupeWindowSeconds: 60,
-    // 图片/表情包识别用的视觉模型
-    visionModel: VISION_MODEL_DEFAULT
+    // 图片识别 + 语音
+    visionModel: VISION_MODEL_DEFAULT,
+    ttsModel: TTS_MODEL_DEFAULT,
+    ttsVoice: TTS_VOICE_DEFAULT,
+    asrModel: ASR_MODEL_DEFAULT,
+    voiceReply: true // 对方发语音 → 回语音（失败退回文字）
   };
 }
 
@@ -203,29 +209,94 @@ function cleanReply(text) {
   return t || null;
 }
 
-/** 用视觉模型描述一张图片/表情包。失败抛错由调用方兜底。 */
-async function describeImage(url, cfg) {
-  const llmCfg = config.getLLM();
-  if (!llmCfg || !llmCfg.apiKey) return null;
-  const msg = await llm.chat({
-    messages: [
-      { role: 'system', content: VISION_SYSTEM },
-      {
-        role: 'user',
-        content: [
-          { type: 'image_url', image_url: { url } },
-          { type: 'text', text: '这张图是什么？表达了什么？' }
-        ]
-      }
-    ],
-    config: { ...llmCfg, model: cfg.visionModel || VISION_MODEL_DEFAULT },
-    allowTools: false,
-    temperature: 0.2
-  });
-  return cleanReply(msg.content);
+/** 下载 URL 内容为 Buffer（带超时） */
+async function fetchBuffer(url, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-async function generateReply(historyTexts, incoming, speaker) {
+/** 图片 Buffer -> data URI（视觉模型本地直传，不走 QQ 签名 URL，快且稳） */
+function imageDataUri(buf) {
+  let mime = 'image/jpeg';
+  if (buf[0] === 0x89 && buf[1] === 0x50) mime = 'image/png';
+  else if (buf[0] === 0x47 && buf[1] === 0x49) mime = 'image/gif';
+  else if (buf.slice(0, 4).toString('latin1') === 'RIFF') mime = 'image/webp';
+  return `data:${mime};base64,${buf.toString('base64')}`;
+}
+
+function audioBase(llmCfg, tail) {
+  const base = String(llmCfg.baseUrl || 'https://api.siliconflow.cn').replace(/\/+$/, '');
+  return base.endsWith('/v1') ? `${base}${tail}` : `${base}/v1${tail}`;
+}
+
+/** 语音转文字（SiliconFlow ASR） */
+async function transcribeAudio(url, cfg) {
+  const llmCfg = config.getLLM();
+  if (!llmCfg || !llmCfg.apiKey) return null;
+  const buf = await fetchBuffer(url);
+  const fd = new FormData();
+  fd.append('file', new Blob([buf], { type: 'audio/mpeg' }), 'voice.mp3');
+  fd.append('model', cfg.asrModel || ASR_MODEL_DEFAULT);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  let res;
+  try {
+    res = await fetch(audioBase(llmCfg, '/audio/transcriptions'), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${llmCfg.apiKey}` },
+      body: fd,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res.ok) throw new Error(`ASR HTTP ${res.status}`);
+  const d = await res.json();
+  return (d.text || '').trim() || null;
+}
+
+/** 文字转语音并落盘。返回 mp3 文件路径 */
+async function ttsToFile(text, cfg) {
+  const llmCfg = config.getLLM();
+  if (!llmCfg || !llmCfg.apiKey) throw new Error('没有配置模型服务');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  let res;
+  try {
+    res = await fetch(audioBase(llmCfg, '/audio/speech'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${llmCfg.apiKey}` },
+      body: JSON.stringify({
+        model: cfg.ttsModel || TTS_MODEL_DEFAULT,
+        input: text,
+        voice: cfg.ttsVoice || TTS_VOICE_DEFAULT,
+        response_format: 'mp3'
+      }),
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`TTS HTTP ${res.status} ${t.slice(0, 120)}`);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  const dir = path.join(path.dirname(stateFile()), 'tts');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `reply-${Date.now()}.mp3`);
+  fs.writeFileSync(file, buf);
+  return file;
+}
+
+async function generateReply(historyTexts, incoming, speaker, imageUri, cfg) {
   const llmCfg = config.getLLM();
   if (!llmCfg || !llmCfg.enabled || !llmCfg.apiKey) {
     return [null, '没有配置模型，无法自动生成回复'];
@@ -236,13 +307,23 @@ async function generateReply(historyTexts, incoming, speaker) {
   }
   if (speaker) user.push(`发言人：${speaker}`);
   user.push(`${speaker ? '群里有人' : '对方'}刚发来的消息：${incoming}\n\n请直接给出要回复的那句话。`);
+  const userText = user.join('\n\n');
 
   const msg = await llm.chat({
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: user.join('\n\n') }
+      {
+        role: 'user',
+        // 带图时用视觉模型一次调用同时看图和出回复，省一次往返
+        content: imageUri
+          ? [
+              { type: 'image_url', image_url: { url: imageUri } },
+              { type: 'text', text: userText }
+            ]
+          : userText
+      }
     ],
-    config: llmCfg,
+    config: imageUri ? { ...llmCfg, model: cfg.visionModel || VISION_MODEL_DEFAULT } : llmCfg,
     allowTools: false,
     temperature: 0.8
   });
@@ -384,9 +465,10 @@ async function onMessage(event) {
     return;
   }
 
-  // 消息内容解析：文字 + 图片/表情包 URL + 经典表情含义
+  // 消息内容解析：文字 + 图片/表情包 URL + 语音 URL + 经典表情含义
   let text = '';
   const imageUrls = [];
+  const voiceUrls = [];
   const faceMarks = [];
   if (Array.isArray(event.message)) {
     for (const seg of event.message) {
@@ -394,6 +476,8 @@ async function onMessage(event) {
         text += (seg.data && seg.data.text) || '';
       } else if ((seg.type === 'image' || seg.type === 'mface') && seg.data && seg.data.url) {
         imageUrls.push(seg.data.url); // 图片和商城表情包都拿得到 URL
+      } else if (seg.type === 'record' && seg.data && seg.data.url) {
+        voiceUrls.push(seg.data.url); // 语音消息
       } else if (seg.type === 'face' && seg.data) {
         faceMarks.push(FACE_NAMES[seg.data.id] || `表情#${seg.data.id}`);
       }
@@ -402,8 +486,8 @@ async function onMessage(event) {
   } else if (typeof event.message === 'string') {
     text = event.message.replace(/\[CQ:[^\]]+\]/g, '').trim();
   }
-  // 语音/文件/纯视频等没有可识别内容的：不猜，不回
-  if (!text && !imageUrls.length && !faceMarks.length) return;
+  // 语音也算有内容（转文字处理）；纯视频/文件等没有可识别内容的：不猜，不回
+  if (!text && !imageUrls.length && !faceMarks.length && !voiceUrls.length) return;
 
   // 同一条消息（对方没点开时 NapCat 会重复上报）不重复回
   const c = chatState(qq);
@@ -417,26 +501,36 @@ async function onMessage(event) {
     return;
   }
 
-  // 有图片/表情包时先让视觉模型看一眼，把描述并进消息内容
-  let incoming = String(text).slice(0, 500);
-  if (imageUrls.length) {
+  // 语音消息先转文字
+  const voiceUrl = voiceUrls[0] || null;
+  if (voiceUrl && !text) {
     try {
-      const cap = await describeImage(imageUrls[0], cfg);
-      if (cap) {
-        incoming = incoming ? `${incoming}（附图：${cap}）` : `（发了一张图片：${cap}）`;
-      } else if (!incoming) {
-        incoming = '（发了一张图片）';
-      }
+      const said = await transcribeAudio(voiceUrl, cfg);
+      if (said) text = said;
+      dbg('[qq]', name, '语音转文字:', said || '(没听清)');
     } catch (err) {
-      dbg('[qq]', name, '图片识别失败：', err.message);
-      if (!incoming) incoming = '（发了一张图片）';
+      dbg('[qq]', name, '语音转文字失败：', err.message);
     }
   }
+
+  let incoming = String(text).slice(0, 500);
   if (faceMarks.length) {
     const marks = faceMarks.join('、');
     incoming = incoming ? `${incoming}（${marks}的表情）` : `（发了个「${marks}」表情）`;
   }
-  if (!incoming) return;
+  const hasImage = imageUrls.length > 0;
+  if (hasImage && !incoming) incoming = '（发了一张图片）';
+  if (!incoming && !hasImage) return;
+
+  // 带图时图片本地下载转 base64，一次视觉调用直接出回复
+  let imageUri = null;
+  if (hasImage) {
+    try {
+      imageUri = imageDataUri(await fetchBuffer(imageUrls[0]));
+    } catch (err) {
+      dbg('[qq]', name, '图片下载失败，改纯文字理解：', err.message);
+    }
+  }
 
   const speaker = isGroup
     ? String((event.sender && (event.sender.card || event.sender.nickname)) || '').slice(0, 30)
@@ -446,7 +540,7 @@ async function onMessage(event) {
   const ctx = (c.ctx || []).slice(-CTX_PER_CHAT);
   let reply;
   try {
-    const [gen, err] = await generateReply(ctx, incoming, speaker);
+    const [gen, err] = await generateReply(ctx, incoming, speaker, imageUri, cfg);
     if (!gen) {
       dbg('[qq]', name, '生成放弃：', err || '模型输出为空/标记跳过');
       return;
@@ -462,14 +556,28 @@ async function onMessage(event) {
     return;
   }
 
-  try {
-    await (isGroup
-      ? client.sendGroupText(targetId, reply)
-      : client.sendPrivateText(targetId, reply));
-  } catch (err) {
-    dbg('[qq]', name, '发送失败：', err.message);
-    say(`QQ 回复 ${name} 发送失败：${err.message}`);
-    return;
+  // 对方发语音 → 回语音；语音合成/发送失败退回文字
+  let sentVoice = false;
+  if (voiceUrl && cfg.voiceReply) {
+    try {
+      const file = await ttsToFile(reply, cfg);
+      await client.sendRecord(isGroup, targetId, file);
+      sentVoice = true;
+      dbg('[qq] 已发送语音 ->', name, reply);
+    } catch (err) {
+      dbg('[qq]', name, '语音发送失败，退回文字：', err.message);
+    }
+  }
+  if (!sentVoice) {
+    try {
+      await (isGroup
+        ? client.sendGroupText(targetId, reply)
+        : client.sendPrivateText(targetId, reply));
+    } catch (err) {
+      dbg('[qq]', name, '发送失败：', err.message);
+      say(`QQ 回复 ${name} 发送失败：${err.message}`);
+      return;
+    }
   }
 
   guardRecord(cfg, qq, reply);
