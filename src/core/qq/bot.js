@@ -21,9 +21,18 @@ const { OneBotClient } = require('./client');
  * 状态落盘 .data/qq-state.json，重启不丢「已处理到哪条」。
  */
 
+// 默认人设（群里人可以要求改，改了会持久化到配置 qq.persona）
+const PERSONA_DEFAULT = '凶巴巴的傲娇小丫头：嘴硬心软、爱损人但没坏心、被夸就傲娇、被怼就炸毛、脏话张口就来（卧槽/妈的/个屁/sb 这个程度，别追着人辱骂）';
+
 // 去人机味思路（参考 github 上多个 QQ 机器人项目的实践）：
 //   小模型规则越少越听话；示范（few-shot）比规则管用得多；温度拉高（1.0）。
-const SYSTEM_PROMPT = `你在 QQ 上替「我」回消息。我这个人设是个凶巴巴的傲娇小丫头：嘴硬心软、爱损人但没坏心、被夸就傲娇、被怼就炸毛、脏话张口就来（卧槽/妈的/个屁/sb 这个程度，别追着人辱骂）。对方不知道背后是谁，每句都要像她本人随手敲的。
+function buildSystemPrompt(personaText) {
+  const persona = (personaText || '').trim() || PERSONA_DEFAULT;
+  const personaLine =
+    persona === PERSONA_DEFAULT
+      ? '我这个人设是：' + persona
+      : `我这个人设是：${persona}\n\n重要：下面的「风格示范」只教你怎么把话说得短、口语、不像 AI。如果示范里的话语气跟你的人设冲突，一律以人设为准，别模仿示范的语气。`;
+  return `你在 QQ 上替「我」回消息。${personaLine}。对方不知道背后是谁，每句都要像本人随手敲的。
 
 硬规矩只有三条：
 1. 只输出要发的那句话：不要旁白、括号动作、引号、前缀，emoji 最多一个
@@ -47,14 +56,25 @@ const SYSTEM_PROMPT = `你在 QQ 上替「我」回消息。我这个人设是�
 - 图片/表情包以（附图：…）（发了个「xx」表情）标注在消息里，照常接话
 - 语音会转成文字给你，就当对方打的字
 - 不确定的事别替本人答应：说「等我看下」「回头再说吧」
-- 群里随手插嘴，别正式，别主动喊人，别当复读机`;
+- 群里随手插嘴，别正式，别主动喊人，别当复读机
+- 有多条消息一起给你时，要像真人攒着看完一起回，别逐条复述
+
+最后重申：你的性格是：${persona}。每句回复都要从这个性格出发。`;
+}
+
+/** 群友要求改性格时的识别提示词 */
+const PERSONA_DETECT_PROMPT = `判断用户消息是否在要求「你」改变性格、语气或说话方式（例如：你能不能温柔点、以后高冷一点、别骂人、说话正经点、你可爱一点行不行）。
+只在明确要求改变说话风格/人设时才算。单纯聊到"性格"这个词、聊别人性格、或只是情绪表达都不算。
+只输出 JSON，不要其他内容：
+{"change": true, "persona": "用第三人称简述新性格，20字内，保留可读的说话风格要点（比如：温柔礼貌，不骂人，说话轻声细语带点关心）"}
+不算时输出 {"change": false, "persona": ""}`;
 
 const REPLY_MAX_CHARS = 120;
 const CTX_PER_CHAT = 6; // 每会话保留的上下文条数（一问一答算两条）
 const CLEAN_PREFIX = ['回复：', '回复:', '可以这样回：'];
 
 // 图片/语音相关模型与音色（SiliconFlow，同一个 API Key）
-const VISION_MODEL_DEFAULT = 'Qwen/Qwen3-VL-30B-A3B-Instruct'; // MoE，识别好且快
+const VISION_MODEL_DEFAULT = 'Qwen/Qwen3-VL-32B-Instruct'; // 稠密 32B，表情包/梗图理解远好于 30B-A3B（只激活 3B）
 const TTS_MODEL_DEFAULT = 'FunAudioLLM/CosyVoice2-0.5B';
 const TTS_VOICE_DEFAULT = 'FunAudioLLM/CosyVoice2-0.5B:alex';
 const ASR_MODEL_DEFAULT = 'FunAudioLLM/SenseVoiceSmall';
@@ -84,12 +104,17 @@ function defaultConfig() {
     maxConsecutive: 3,
     maxPerHour: 20,
     dedupeWindowSeconds: 60,
+    // 攒消息：对方连发多条时等这么久（毫秒）再一次性回复
+    batchWaitMs: 4000,
+    // 人设（null = 用内置傲娇萝莉；群里人要求改会写进来）
+    persona: null,
     // 图片识别 + 语音
     visionModel: VISION_MODEL_DEFAULT,
     ttsModel: TTS_MODEL_DEFAULT,
     ttsVoice: TTS_VOICE_DEFAULT,
     asrModel: ASR_MODEL_DEFAULT,
-    voiceReply: true // 对方发语音 → 回语音（失败退回文字）
+    voiceReply: true, // 对方发语音 → 回语音（失败退回文字）
+    voiceAlways: false // true = 所有回复都发语音
   };
 }
 
@@ -328,7 +353,7 @@ async function generateReply(historyTexts, incoming, speaker, imageUri, cfg) {
 
   const msg = await llm.chat({
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: buildSystemPrompt(cfg.persona) },
       {
         role: 'user',
         // 带图时用视觉模型一次调用同时看图和出回复，省一次往返
@@ -453,6 +478,36 @@ async function handleEvent(event) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* 消息聚合：对方连发多条 → 攒 batchWaitMs 后合并成一次回复              */
+/* ------------------------------------------------------------------ */
+
+const pendingChats = new Map(); // qq -> { timer, items: [] }
+
+/** 群友要求改性格：关键词粗筛 + LLM 精判。命中返回新人设文本，否则 null */
+async function detectPersonaChange(text) {
+  const llmCfg = config.getLLM();
+  if (!llmCfg || !llmCfg.apiKey) return null;
+  const msg = await llm.chat({
+    messages: [
+      { role: 'system', content: PERSONA_DETECT_PROMPT },
+      { role: 'user', content: String(text).slice(0, 300) }
+    ],
+    config: llmCfg,
+    allowTools: false,
+    temperature: 0.1
+  });
+  try {
+    const m = String(msg.content || '').match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    const d = JSON.parse(m[0]);
+    if (d.change && d.persona && String(d.persona).trim()) return String(d.persona).trim().slice(0, 120);
+  } catch {
+    /* JSON 解析失败当没识别到 */
+  }
+  return null;
+}
+
 async function onMessage(event) {
   const cfg = getCfg();
   if (!cfg.enabled) return;
@@ -482,7 +537,13 @@ async function onMessage(event) {
     return;
   }
 
-  // 消息内容解析：文字 + 图片/表情包 URL + 语音 URL + 经典表情含义
+  // 同一条消息（对方没点开时 NapCat 会重复上报）不重复回
+  const c = chatState(qq);
+  if (event.message_id && c.lastMsgId === event.message_id) return;
+  c.lastMsgId = event.message_id;
+  saveState();
+
+  // 解析消息内容：文字 + 图片/表情包 URL + 语音 URL + 经典表情含义
   let text = '';
   const imageUrls = [];
   const voiceUrls = [];
@@ -503,14 +564,81 @@ async function onMessage(event) {
   } else if (typeof event.message === 'string') {
     text = event.message.replace(/\[CQ:[^\]]+\]/g, '').trim();
   }
-  // 语音也算有内容（转文字处理）；纯视频/文件等没有可识别内容的：不猜，不回
+  // 纯视频/文件等没有可识别内容的：不猜，不回
   if (!text && !imageUrls.length && !faceMarks.length && !voiceUrls.length) return;
 
-  // 同一条消息（对方没点开时 NapCat 会重复上报）不重复回
-  const c = chatState(qq);
-  if (event.message_id && c.lastMsgId === event.message_id) return;
-  c.lastMsgId = event.message_id;
-  saveState();
+  const item = {
+    text,
+    imageUrls,
+    voiceUrls,
+    faceMarks,
+    isGroup,
+    targetId,
+    qq,
+    name,
+    speaker: isGroup
+      ? String((event.sender && (event.sender.card || event.sender.nickname)) || '').slice(0, 30)
+      : ''
+  };
+
+  // 入队攒批：等 batchWaitMs，看对方还有没有下一条
+  let pend = pendingChats.get(qq);
+  if (!pend) {
+    pend = { timer: null, items: [] };
+    pendingChats.set(qq, pend);
+  }
+  pend.items.push(item);
+  if (pend.timer) clearTimeout(pend.timer);
+  pend.timer = setTimeout(() => {
+    flushChat(qq).catch((err) => dbg('[qq] 聚合回复失败:', err.message));
+  }, cfg.batchWaitMs || 4000);
+  dbg('[qq] 暂存消息（攒批中）:', name, item.speaker || '', String(item.text).slice(0, 30));
+}
+
+async function flushChat(qq) {
+  const pend = pendingChats.get(qq);
+  const items = (pend && pend.items) || [];
+  if (pend) {
+    if (pend.timer) clearTimeout(pend.timer);
+    pendingChats.delete(qq);
+  }
+  if (!items.length) return;
+  const first = items[0];
+  const { isGroup, targetId, name } = first;
+  const cfg = getCfg();
+
+  // 逐条拼 incoming：语音转文字、表情标注，群聊带发言人
+  const parts = [];
+  const faceMarksAll = [];
+  let voiceUrl = null;
+  let imageUrl = null;
+  for (const it of items) {
+    let text = it.text;
+    if (!text && it.voiceUrls.length) {
+      try {
+        const said = await transcribeAudio(it.voiceUrls[0], cfg);
+        if (said) text = said;
+        dbg('[qq] 语音转文字:', said || '(没听清)');
+      } catch (err) {
+        dbg('[qq] 语音转文字失败：', err.message);
+      }
+    }
+    if (it.voiceUrls.length && !voiceUrl) voiceUrl = it.voiceUrls[0];
+    if (it.imageUrls.length && !imageUrl) imageUrl = it.imageUrls[it.imageUrls.length - 1];
+    faceMarksAll.push(...it.faceMarks);
+
+    let piece = String(text).slice(0, 500);
+    if (it.faceMarks.length) {
+      const marks = it.faceMarks.join('、');
+      piece = piece ? `${piece}（${marks}的表情）` : `（发了个「${marks}」表情）`;
+    }
+    if (it.isGroup && it.speaker) piece = `${it.speaker}：${piece || '（没打字，只发了图/表情）'}`;
+    if (piece) parts.push(piece);
+  }
+  let incoming = parts.join('\n');
+  if (faceMarksAll.length && !parts.length) incoming = `（发了个「${faceMarksAll.join('、')}」表情）`;
+  if (imageUrl && !incoming) incoming = '（发了一张图片）';
+  if (!incoming && !imageUrl) return;
 
   const [ok, why] = guardCheck(cfg, qq);
   if (!ok) {
@@ -518,46 +646,36 @@ async function onMessage(event) {
     return;
   }
 
-  // 语音消息先转文字
-  const voiceUrl = voiceUrls[0] || null;
-  if (voiceUrl && !text) {
+  say(`QQ 收到 ${name} 的消息${items.length > 1 ? `（攒了 ${items.length} 条）` : ''}：「${incoming.slice(0, 40).replace(/\n/g, ' / ')}${incoming.length > 40 ? '…' : ''}」，正在想怎么回`);
+
+  // 群友/私聊对象要求改性格：关键词粗筛 + LLM 精判，命中就持久化并当场生效
+  if (/性格|人设|语气|说话(方式|风格)|好好说话|换(个)?人设|别这样(说话|回)/.test(incoming)) {
     try {
-      const said = await transcribeAudio(voiceUrl, cfg);
-      if (said) text = said;
-      dbg('[qq]', name, '语音转文字:', said || '(没听清)');
+      const np = await detectPersonaChange(incoming);
+      if (np) {
+        config.set({ qq: { ...cfg, persona: np } });
+        say(`QQ 性格已按对方要求改为：${np}`);
+        dbg('[qq] 人设变更 ->', np);
+      }
     } catch (err) {
-      dbg('[qq]', name, '语音转文字失败：', err.message);
+      dbg('[qq] 人设识别失败：', err.message);
     }
   }
 
-  let incoming = String(text).slice(0, 500);
-  if (faceMarks.length) {
-    const marks = faceMarks.join('、');
-    incoming = incoming ? `${incoming}（${marks}的表情）` : `（发了个「${marks}」表情）`;
-  }
-  const hasImage = imageUrls.length > 0;
-  if (hasImage && !incoming) incoming = '（发了一张图片）';
-  if (!incoming && !hasImage) return;
-
   // 带图时图片本地下载转 base64，一次视觉调用直接出回复
   let imageUri = null;
-  if (hasImage) {
+  if (imageUrl) {
     try {
-      imageUri = imageDataUri(await fetchBuffer(imageUrls[0]));
+      imageUri = imageDataUri(await fetchBuffer(imageUrl));
     } catch (err) {
       dbg('[qq]', name, '图片下载失败，改纯文字理解：', err.message);
     }
   }
 
-  const speaker = isGroup
-    ? String((event.sender && (event.sender.card || event.sender.nickname)) || '').slice(0, 30)
-    : '';
-  say(`QQ 收到 ${name}${speaker ? ` 里 ${speaker}` : ''} 的消息：「${incoming.slice(0, 40)}${incoming.length > 40 ? '…' : ''}」，正在想怎么回`);
-
-  const ctx = (c.ctx || []).slice(-CTX_PER_CHAT);
+  const ctx = (chatState(qq).ctx || []).slice(-CTX_PER_CHAT);
   let reply;
   try {
-    const [gen, err] = await generateReply(ctx, incoming, speaker, imageUri, cfg);
+    const [gen, err] = await generateReply(ctx, incoming, '', imageUri, getCfg());
     if (!gen) {
       dbg('[qq]', name, '生成放弃：', err || '模型输出为空/标记跳过');
       return;
@@ -568,16 +686,18 @@ async function onMessage(event) {
     return;
   }
 
-  if (isDuplicate(cfg, qq, reply)) {
+  if (isDuplicate(getCfg(), qq, reply)) {
     dbg('[qq]', name, '回复与最近重复，放弃本次');
     return;
   }
 
-  // 对方发语音 → 回语音；语音合成/发送失败退回文字
+  // 发语音的条件：对方发了语音 / 明确要语音 / 配置 voiceAlways。失败退回文字
+  const voiceReq = /发(条|个|个)?语音|语音回|用语音|语音说|语音呢|说句话听听/.test(incoming);
+  const wantVoice = !!getCfg().voiceReply && !!(voiceUrl || getCfg().voiceAlways || voiceReq);
   let sentVoice = false;
-  if (voiceUrl && cfg.voiceReply) {
+  if (wantVoice) {
     try {
-      const file = await ttsToFile(reply, cfg);
+      const file = await ttsToFile(reply, getCfg());
       await client.sendRecord(isGroup, targetId, file);
       sentVoice = true;
       dbg('[qq] 已发送语音 ->', name, reply);
@@ -597,13 +717,12 @@ async function onMessage(event) {
     }
   }
 
-  guardRecord(cfg, qq, reply);
-  // 重置连发计数：对方又说了话算新一轮交互
+  guardRecord(getCfg(), qq, reply);
   const cs = chatState(qq);
-  cs.ctx = [...ctx, `对方：${incoming}`, `我：${reply}`].slice(-CTX_PER_CHAT);
+  cs.ctx = [...ctx, `对方：${incoming.replace(/\n/g, '；')}`, `我：${reply}`].slice(-CTX_PER_CHAT);
   saveState();
 
-  say(`已替你回复 ${name}：「${reply}」`);
+  say(`已替你回复 ${name}${sentVoice ? '（语音）' : ''}：「${reply}」`);
   dbg('[qq] 已发送 ->', name, reply);
 }
 
@@ -621,6 +740,10 @@ function init(notifierFn) {
 }
 
 function shutdown() {
+  for (const [, pend] of pendingChats) {
+    if (pend.timer) clearTimeout(pend.timer);
+  }
+  pendingChats.clear();
   if (client) {
     client.stop();
     client = null;
@@ -636,5 +759,5 @@ module.exports = {
   shutdown,
   setNotifier,
   // 内部函数导出仅供测试
-  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, SYSTEM_PROMPT }
+  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT }
 };

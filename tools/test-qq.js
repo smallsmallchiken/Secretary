@@ -108,6 +108,7 @@ async function main() {
   // 桩 NapCat：WS server + 最小 OpenAI 兼容接口（不需要，llm 已打桩）
   const received = []; // 收到的 { action, params }
   let replyCount = 0;
+  let groupCount = 0;
 
   const wss = new WebSocket.Server({ port: 0 }, () => {
     const port = wss.address().port;
@@ -129,6 +130,9 @@ async function main() {
         } else if (msg.action === 'send_private_msg') {
           replyCount++;
           ws.send(JSON.stringify({ status: 'async', retcode: 0, data: { message_id: 777 }, echo: msg.echo }));
+        } else if (msg.action === 'send_group_msg') {
+          groupCount++;
+          ws.send(JSON.stringify({ status: 'async', retcode: 0, data: { message_id: 778 }, echo: msg.echo }));
         }
         return;
       }
@@ -159,7 +163,9 @@ async function main() {
           perChatIntervalSeconds: 0,
           maxConsecutive: 99,
           maxPerHour: 99,
-          dedupeWindowSeconds: 60
+          dedupeWindowSeconds: 60,
+          batchWaitMs: 10,
+          voiceReply: false
         }
       });
 
@@ -243,6 +249,32 @@ async function main() {
         user_id: 10001, message_id: 102, message: [{ type: 'text', data: { text: '又来了' } }]
       });
       check('间隔护栏拦截', replyCount === 1, `实际 ${replyCount}`);
+      config.set({ qq: { perChatIntervalSeconds: 0 } });
+
+      // 用例 H：连发两条 → 攒批后只回一次（llm 桩固定文案会撞去重，先关掉）
+      config.set({ qq: { dedupeWindowSeconds: 0 } });
+      petWs.send(JSON.stringify({
+        post_type: 'message', message_type: 'private', sub_type: 'friend',
+        user_id: 10001, message_id: 200, message: [{ type: 'text', data: { text: '跟你说个事' } }]
+      }));
+      petWs.send(JSON.stringify({
+        post_type: 'message', message_type: 'private', sub_type: 'friend',
+        user_id: 10001, message_id: 201, message: [{ type: 'text', data: { text: '算了没事了' } }]
+      }));
+      await new Promise((r) => setTimeout(r, 1200)); // 等 batchWaitMs(10ms) + 生成
+      check('连发两条只回一次（攒批）', replyCount === 2, `实际 ${replyCount}`);
+
+      // 用例 I：白名单群 → send_group_msg 回复
+      config.set({ qq: { whitelist: [{ qq: 10001, name: '老王' }, { group: 888, name: '测试群' }] } });
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'group', sub_type: 'normal',
+        user_id: 10001, group_id: 888, message_id: 300,
+        sender: { card: '小明', nickname: '小明' },
+        message: [{ type: 'text', data: { text: '大家晚上吃什么' } }]
+      });
+      check('白名单群自动回复', groupCount === 1, `实际 ${groupCount}`);
+      const gSent = received.find((r) => r.action === 'send_group_msg');
+      check('群回复发给正确的群', gSent && String(gSent.params.group_id) === '888');
 
       bot.shutdown();
       wss.close();

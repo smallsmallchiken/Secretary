@@ -22,9 +22,15 @@ Module._resolveFilename = function (request, ...rest) {
 const config = require('../src/core/config');
 const llm = require('../src/core/llm');
 const { _internals } = require('../src/core/qq/bot');
-const { cleanReply, SYSTEM_PROMPT } = _internals;
+const { cleanReply, buildSystemPrompt, PERSONA_DEFAULT } = _internals;
 
 const args = process.argv.slice(2);
+let personaArg = null;
+const pFlag = args.indexOf('--persona');
+if (pFlag >= 0) {
+  personaArg = args[pFlag + 1] || '';
+  args.splice(pFlag, 2);
+}
 const ctxFlag = args.indexOf('--ctx');
 let ctxLines = [];
 if (ctxFlag >= 0) {
@@ -50,7 +56,7 @@ async function reply(incoming) {
   const t0 = Date.now();
   const msg = await llm.chat({
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: buildSystemPrompt(personaArg) },
       { role: 'user', content: user.join('\n\n') }
     ],
     config: llmCfg,
