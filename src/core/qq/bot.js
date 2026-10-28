@@ -128,6 +128,8 @@ function defaultConfig() {
     token: '',
     // 白名单：{ qq, name } 私聊；{ group, name } 群聊。空数组 = 谁都不回
     whitelist: [],
+    // true = 所有好友私聊都回复（不受白名单限制）；群聊仍然只回白名单里的群
+    allFriends: false,
     // 护栏参数
     perChatIntervalSeconds: 20,
     maxConsecutive: 3,
@@ -623,15 +625,16 @@ function status() {
     selfId: client ? client.selfId : null,
     url: cfg.wsUrl,
     whitelist: cfg.whitelist,
-    whitelistCount: (cfg.whitelist || []).length
+    whitelistCount: (cfg.whitelist || []).length,
+    allFriends: !!cfg.allFriends
   };
 }
 
 async function start() {
   const cfg = getCfg();
   if (client) stop(true);
-  if (!cfg.whitelist || !cfg.whitelist.length) {
-    say('QQ 自动回复没启动：白名单是空的（先把要回复的人加进配置）');
+  if ((!cfg.whitelist || !cfg.whitelist.length) && !cfg.allFriends) {
+    say('QQ 自动回复没启动：白名单是空的（先把要回复的人加进配置，或开启 allFriends）');
     return { ok: false, message: '白名单为空' };
   }
   loadState();
@@ -642,7 +645,11 @@ async function start() {
     onStatus: (s, detail) => {
       dbg('[qq] 连接状态:', s, detail || '');
       if (s === 'connected') {
-        say('QQ 机器人已连上 NapCat，开始值守私聊白名单');
+        say(
+          cfg.allFriends
+            ? 'QQ 机器人已连上 NapCat，所有好友私聊都会回复'
+            : 'QQ 机器人已连上 NapCat，开始值守私聊白名单'
+        );
         client
           .getLoginInfo()
           .then((info) => {
@@ -764,7 +771,11 @@ async function onMessage(event) {
   const isGroup = event.message_type === 'group';
   const targetId = isGroup ? event.group_id : event.user_id;
   const qq = String(targetId); // 护栏状态键：群聊按群、私聊按人
-  const name = matchWhitelist(cfg, event);
+  let name = matchWhitelist(cfg, event);
+  // allFriends：所有好友私聊都回，名字只用于气泡上显示（不参与理解）
+  if (!name && !isGroup && cfg.allFriends) {
+    name = String((event.sender && (event.sender.card || event.sender.nickname)) || qq).slice(0, 30);
+  }
   if (!name) {
     dbg('[qq]', qq, '不在白名单，忽略');
     return;

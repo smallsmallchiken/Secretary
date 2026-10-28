@@ -385,6 +385,30 @@ async function main() {
       const personaLogText = JSON.stringify(_internals.loadState().personaLog[0] || {});
       check('调教记录带请求原文', personaLogText.includes('温柔'), personaLogText);
 
+      // 用例 O：allFriends=true 时所有好友私聊都回（群聊仍按白名单）
+      config.set({ qq: { allFriends: true } });
+      llmStub.behavior = () => '行 我知道';
+      const beforeAll = replyCount;
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'private', sub_type: 'friend',
+        user_id: 99999, message_id: 700,
+        sender: { nickname: '陌生好友' },
+        message: [{ type: 'text', data: { text: '在吗兄弟' } }]
+      });
+      check('所有好友私聊都回', replyCount === beforeAll + 1, `实际 ${replyCount}`);
+      const allSent = received.filter((r) => r.action === 'send_private_msg').pop();
+      check('回给陌生好友', allSent && String(allSent.params.user_id) === '99999', allSent && String(allSent.params.user_id));
+      // 群聊不受 allFriends 影响：非白名单群仍然不回
+      const beforeGroup = groupCount;
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'group', sub_type: 'normal',
+        user_id: 10001, group_id: 999, message_id: 701,
+        sender: { card: '路人' },
+        message: [{ type: 'text', data: { text: '这个群也回吗' } }]
+      });
+      check('非白名单群仍然不回', groupCount === beforeGroup, `实际 ${groupCount}`);
+      config.set({ qq: { allFriends: false } });
+
       bot.shutdown();
       wss.close();
     } finally {
