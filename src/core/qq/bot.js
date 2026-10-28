@@ -34,6 +34,20 @@ const REPLY_MAX_CHARS = 120;
 const CTX_PER_CHAT = 6; // 每会话保留的上下文条数（一问一答算两条）
 const CLEAN_PREFIX = ['回复：', '回复:', '可以这样回：'];
 
+// 图片/表情包识别用的视觉模型（SiliconFlow 的 Qwen3-VL，走同一个 API Key）
+const VISION_MODEL_DEFAULT = 'Qwen/Qwen3-VL-8B-Instruct';
+const VISION_SYSTEM = `你是帮人看 QQ 聊天图片的助手。对发来的图片或表情包，用一句话（30 字以内）说明内容和你感受到的情绪。
+如果是表情包/梗图，直接说明它表达的态度（比如「无语」「哈哈大笑」「委屈巴巴」「点赞认可」）。
+如果是截图或照片，简述关键内容。只输出这一句话本身。`;
+
+// QQ 经典小黄脸 id -> 含义（常用的前 30 个）
+const FACE_NAMES = {
+  0: '微笑', 1: '撇嘴', 2: '色', 3: '发呆', 4: '得意', 5: '流泪', 6: '害羞', 7: '闭嘴',
+  8: '睡', 9: '大哭', 10: '尴尬', 11: '发怒', 12: '调皮', 13: '呲牙', 14: '惊讶', 15: '难过',
+  16: '酷', 17: '冷汗', 18: '抓狂', 19: '吐', 20: '偷笑', 21: '可爱', 22: '白眼', 23: '傲慢',
+  24: '饥饿', 25: '困', 26: '惊恐', 27: '流汗', 28: '憨笑', 29: '悠闲', 30: '奋斗'
+};
+
 /* ------------------------------------------------------------------ */
 /* 配置                                                                */
 /* ------------------------------------------------------------------ */
@@ -50,7 +64,9 @@ function defaultConfig() {
     perChatIntervalSeconds: 20,
     maxConsecutive: 3,
     maxPerHour: 20,
-    dedupeWindowSeconds: 60
+    dedupeWindowSeconds: 60,
+    // 图片/表情包识别用的视觉模型
+    visionModel: VISION_MODEL_DEFAULT
   };
 }
 
@@ -185,6 +201,28 @@ function cleanReply(text) {
   }
   t = t.trim().split('\n')[0].slice(0, REPLY_MAX_CHARS).trim();
   return t || null;
+}
+
+/** 用视觉模型描述一张图片/表情包。失败抛错由调用方兜底。 */
+async function describeImage(url, cfg) {
+  const llmCfg = config.getLLM();
+  if (!llmCfg || !llmCfg.apiKey) return null;
+  const msg = await llm.chat({
+    messages: [
+      { role: 'system', content: VISION_SYSTEM },
+      {
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url } },
+          { type: 'text', text: '这张图是什么？表达了什么？' }
+        ]
+      }
+    ],
+    config: { ...llmCfg, model: cfg.visionModel || VISION_MODEL_DEFAULT },
+    allowTools: false,
+    temperature: 0.2
+  });
+  return cleanReply(msg.content);
 }
 
 async function generateReply(historyTexts, incoming, speaker) {
@@ -346,18 +384,26 @@ async function onMessage(event) {
     return;
   }
 
-  // 消息文本（数组格式取 text 段；纯字符串兜底）
+  // 消息内容解析：文字 + 图片/表情包 URL + 经典表情含义
   let text = '';
+  const imageUrls = [];
+  const faceMarks = [];
   if (Array.isArray(event.message)) {
-    text = event.message
-      .filter((seg) => seg.type === 'text')
-      .map((seg) => seg.data && seg.data.text)
-      .join('')
-      .trim();
+    for (const seg of event.message) {
+      if (seg.type === 'text') {
+        text += (seg.data && seg.data.text) || '';
+      } else if ((seg.type === 'image' || seg.type === 'mface') && seg.data && seg.data.url) {
+        imageUrls.push(seg.data.url); // 图片和商城表情包都拿得到 URL
+      } else if (seg.type === 'face' && seg.data) {
+        faceMarks.push(FACE_NAMES[seg.data.id] || `表情#${seg.data.id}`);
+      }
+    }
+    text = text.trim();
   } else if (typeof event.message === 'string') {
     text = event.message.replace(/\[CQ:[^\]]+\]/g, '').trim();
   }
-  if (!text) return; // 图片/语音/文件等：不猜，不回
+  // 语音/文件/纯视频等没有可识别内容的：不猜，不回
+  if (!text && !imageUrls.length && !faceMarks.length) return;
 
   // 同一条消息（对方没点开时 NapCat 会重复上报）不重复回
   const c = chatState(qq);
@@ -371,7 +417,27 @@ async function onMessage(event) {
     return;
   }
 
-  const incoming = String(text).slice(0, 500);
+  // 有图片/表情包时先让视觉模型看一眼，把描述并进消息内容
+  let incoming = String(text).slice(0, 500);
+  if (imageUrls.length) {
+    try {
+      const cap = await describeImage(imageUrls[0], cfg);
+      if (cap) {
+        incoming = incoming ? `${incoming}（附图：${cap}）` : `（发了一张图片：${cap}）`;
+      } else if (!incoming) {
+        incoming = '（发了一张图片）';
+      }
+    } catch (err) {
+      dbg('[qq]', name, '图片识别失败：', err.message);
+      if (!incoming) incoming = '（发了一张图片）';
+    }
+  }
+  if (faceMarks.length) {
+    const marks = faceMarks.join('、');
+    incoming = incoming ? `${incoming}（${marks}的表情）` : `（发了个「${marks}」表情）`;
+  }
+  if (!incoming) return;
+
   const speaker = isGroup
     ? String((event.sender && (event.sender.card || event.sender.nickname)) || '').slice(0, 30)
     : '';
