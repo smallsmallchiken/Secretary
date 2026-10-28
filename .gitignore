@@ -26,3 +26,6 @@ dist/
 # NapCat 协议端（1GB+ 独立 QQ 内核，官方下载即可，不入库）
 qq-bot/napcat/
 qq-bot/*.zip
+
+# 本地工具二进制（ffmpeg 变声用）
+tools/ffmpeg/
