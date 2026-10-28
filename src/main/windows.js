@@ -249,7 +249,33 @@ function createBubbleWindow() {
     bubbleReady = false;
   });
 
+  // 气泡尺寸恒定：任何不经过 setBounds(目标尺寸) 的路径把尺寸改了，立刻钉回去
+  bubbleWin.on('resize', snapBubbleSize);
+
   return bubbleWin;
+}
+
+/** 气泡窗口当前应有的目标尺寸（不读窗口本身——125% 缩放下读回再写回会累积取整误差，越拖越大） */
+function bubbleTargetSize() {
+  return bubbleMode === 'settings'
+    ? { width: BUBBLE_W, height: BUBBLE_H }
+    : { width: BUBBLE_CHAT_W, height: bubbleChatH };
+}
+
+/** 同 snapPetSize：任何路径把气泡尺寸改了，立刻钉回目标值（容差内不动，防和 resize 事件互相触发） */
+function snapBubbleSize() {
+  const win = bubbleWin && !bubbleWin.isDestroyed() ? bubbleWin : null;
+  if (!win) return false;
+  const b = win.getBounds();
+  const { width, height } = bubbleTargetSize();
+  if (Math.abs(b.width - width) <= SIZE_TOLERANCE && Math.abs(b.height - height) <= SIZE_TOLERANCE) {
+    return false;
+  }
+  win.setBounds({ x: b.x, y: b.y, width, height });
+  require('../core/debug').dbg(
+    `[snap-bubble] 尺寸被改动 ${b.width}x${b.height} -> ${width}x${height}，已钉回`
+  );
+  return true;
 }
 
 /**
@@ -265,7 +291,9 @@ function positionBubble() {
   if (!bubbleWin || bubbleWin.isDestroyed() || !petWin || petWin.isDestroyed()) return;
   const pb = petWin.getBounds();
   const wa = screen.getDisplayMatching(pb).workArea;
-  const [bw, bh] = bubbleWin.getSize();
+  // 用目标尺寸而非 getSize()：拖动时每次 setBounds 的 DIP↔物理像素取整误差会累积，
+  // 读回已漂移的尺寸再写回 = 越拖越大、锚点跟着飘（桌宠窗口已用同款方案修过）
+  const { width: bw, height: bh } = bubbleTargetSize();
 
   const headY = pb.y + Math.round(pb.height * HEAD_RATIO);
   const anchor = bubbleMode === 'settings' ? TAIL_INSET : DOT_INSET;
