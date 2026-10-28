@@ -378,6 +378,9 @@ app.whenReady().then(() => {
 
   applyAutoLaunch(config.get('autoLaunch'));
 
+  // 存活心跳：进程若是静默死亡，至少能从日志推断死亡时间
+  setInterval(() => dbg('[alive] 还活着'), 5 * 60 * 1000);
+
   // 调试用：--settings 启动直接打开设置面板，--chat 直接打开对话
   if (process.argv.includes('--settings') || process.argv.includes('--chat')) {
     setTimeout(() => {

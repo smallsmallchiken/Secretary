@@ -30,6 +30,8 @@ class OneBotClient {
     this.stopped = true;
     this.selfId = null; // 登录的 QQ 号，登录后由 bot 层调 get_login_info 填
     this._fails = 0; // 连续重连失败次数，驱动指数退避
+    this._lastFrameAt = 0; // 最后一帧（含心跳）时间，喂看门狗
+    this._watchdog = null;
   }
 
   start() {
@@ -39,6 +41,7 @@ class OneBotClient {
 
   stop() {
     this.stopped = true;
+    this._stopWatchdog();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -78,7 +81,11 @@ class OneBotClient {
     }
     this.ws = ws;
 
+    ws.on('message', () => {
+      this._lastFrameAt = Date.now();
+    });
     ws.on('open', () => {
+      this._lastFrameAt = Date.now();
       this._fails = 0;
       this.onStatus('connected');
     });
@@ -115,6 +122,7 @@ class OneBotClient {
     });
 
     ws.on('close', () => {
+      this._stopWatchdog();
       this.ws = null;
       if (!this.stopped) {
         this._fails++;
@@ -122,6 +130,28 @@ class OneBotClient {
         this._scheduleReconnect();
       }
     });
+
+    // 看门狗：NapCat 每隔几秒会推心跳，太久没任何帧说明连接已僵尸，
+    // 主动掐掉触发重连（实测强杀 NapCat 时 close 事件可能不来）
+    this._stopWatchdog();
+    this._watchdog = setInterval(() => {
+      if (this.stopped || !this.connected) return;
+      if (Date.now() - this._lastFrameAt > 90000) {
+        this.onStatus('error', '90 秒没有任何数据，判定连接僵尸化，强制重连');
+        try {
+          this.ws.terminate();
+        } catch {
+          /* close 兜底 */
+        }
+      }
+    }, 30000);
+  }
+
+  _stopWatchdog() {
+    if (this._watchdog) {
+      clearInterval(this._watchdog);
+      this._watchdog = null;
+    }
   }
 
   _scheduleReconnect() {
