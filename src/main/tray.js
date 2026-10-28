@@ -8,8 +8,7 @@ const windows = require('./windows');
 let tray = null;
 
 function buildMenu() {
-  const petWin = windows.getPetWindow();
-  const visible = !!(petWin && petWin.isVisible());
+  const visible = windows.isPetVisible();
 
   return Menu.buildFromTemplate([
     { label: '万能桌宠', enabled: false },
@@ -17,13 +16,7 @@ function buildMenu() {
     {
       label: visible ? '隐藏桌宠' : '显示桌宠',
       click: () => {
-        if (!petWin) return;
-        if (petWin.isVisible()) petWin.hide();
-        else {
-          petWin.show();
-          const pos = windows.dockPosition(petWin);
-          petWin.setPosition(pos.x, pos.y);
-        }
+        windows.togglePet();
         refreshTray();
       }
     },
@@ -66,13 +59,20 @@ function buildMenu() {
 }
 
 function createTray() {
-  const iconPath = path.join(__dirname, '..', 'assets', 'tray.png');
-  let image = nativeImage.createFromPath(iconPath);
-  if (image.isEmpty()) {
-    // 兜底：1x1 透明图标，至少不让托盘崩
-    image = nativeImage.createEmpty();
-  } else {
-    image = image.resize({ width: 20, height: 20 });
+  // 托盘只露一个头（全身图缩到 20px 会糊成一坨）
+  const assets = path.join(__dirname, '..', 'assets');
+  const candidates = [
+    path.join(assets, 'tray-head.png'),
+    path.join(assets, 'tray.png')
+  ];
+
+  let image = nativeImage.createEmpty();
+  for (const file of candidates) {
+    const img = nativeImage.createFromPath(file);
+    if (!img.isEmpty()) {
+      image = img.resize({ width: 20, height: 20, quality: 'best' });
+      break;
+    }
   }
 
   tray = new Tray(image);
@@ -85,7 +85,7 @@ function createTray() {
     if (win) {
       win.show();
       const pos = windows.dockPosition(win);
-      win.setPosition(pos.x, pos.y);
+      windows.movePet(pos.x, pos.y);
     }
   });
 
