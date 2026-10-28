@@ -21,6 +21,19 @@ process.on('unhandledRejection', (reason) => {
   dbg('[fatal] 未处理的 Promise 拒绝：', String((reason && reason.stack) || reason));
 });
 
+// 子进程（GPU/网络服务/渲染进程）异常退出都记一笔——之前主进程静默死亡，
+// stderr 只留下 "Network service crashed"，需要能定位是哪个进程带的
+app.on('child-process-gone', (_e, details) => {
+  dbg('[proc]', details.type, 'reason=', details.reason, 'exitCode=', details.exitCode);
+});
+app.on('render-process-gone', (_e, _win, details) => {
+  dbg('[proc] renderer reason=', details.reason, 'exitCode=', details.exitCode);
+});
+// 主动退出（托盘退出/单实例冲突）会走这里，留下日志可区分「主动退」和「崩」
+app.on('before-quit', () => {
+  dbg('[quit] before-quit 触发, quitting=', global.__quitting === true);
+});
+
 // 透明窗口 + canvas 2D 用不着 GPU，关掉硬件加速能避开不少显卡驱动的坑
 app.disableHardwareAcceleration();
 

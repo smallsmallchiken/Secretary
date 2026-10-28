@@ -169,6 +169,8 @@ async function main() {
           wsUrl: `ws://127.0.0.1:${port}`,
           token: '',
           whitelist: [{ qq: 10001, name: '老王' }],
+          // 必须显式关掉：真实配置里 allFriends 可能为 true，会把「白名单外不回」的用例带偏
+          allFriends: false,
           perChatIntervalSeconds: 0,
           maxConsecutive: 99,
           maxPerHour: 99,
