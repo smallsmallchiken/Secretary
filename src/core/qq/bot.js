@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const config = require('../config');
 const llm = require('../llm');
 const { dbg } = require('../debug');
@@ -28,12 +29,22 @@ const PERSONA_DEFAULT = '凶巴巴的傲娇小丫头：嘴硬心软、爱损人�
 
 // 去人机味思路（参考 github 上多个 QQ 机器人项目的实践）：
 //   小模型规则越少越听话；示范（few-shot）比规则管用得多；温度拉高（1.0）。
-function buildSystemPrompt(personaText) {
+function buildSystemPrompt(personaText, memeList) {
   const persona = (personaText || '').trim() || PERSONA_DEFAULT;
   const personaLine =
     persona === PERSONA_DEFAULT
       ? '我这个人设是：' + persona
       : `我这个人设是：${persona}\n\n重要：下面的「风格示范」只教你怎么把话说得短、口语、不像 AI。如果示范里的话语气跟你的人设冲突，一律以人设为准，别模仿示范的语气。`;
+  const memeBlock =
+    memeList && memeList.trim()
+      ? `\n\n手头有一批表情包可以随回复发出去，格式是 [图:文件名]：
+${memeList.trim()}
+
+配图规矩：
+- 觉得有一张特别搭的时候，把 [图:文件名] 写在回复的最末尾；只发图不说话也行（整条回复就写 [图:文件名]）
+- 大多数时候别配图，硬凑很尬；一次最多一张
+- 只能从上面清单里挑，别的图你没有`
+      : '';
   return `你在 QQ 上替「我」回消息。${personaLine}。对方不知道背后是谁，每句都要像本人随手敲的。
 
 硬规矩只有三条：
@@ -61,7 +72,7 @@ function buildSystemPrompt(personaText) {
 - 群里随手插嘴，别正式，别主动喊人，别当复读机
 - 有多条消息一起给你时，要像真人攒着看完一起回，别逐条复述
 
-最后重申：你的性格是：${persona}。每句回复都要从这个性格出发。`;
+最后重申：你的性格是：${persona}。每句回复都要从这个性格出发。${memeBlock}`;
 }
 
 /** 群友要求改性格时的识别提示词 */
@@ -116,7 +127,8 @@ function defaultConfig() {
     ttsVoice: TTS_VOICE_DEFAULT,
     asrModel: ASR_MODEL_DEFAULT,
     voiceReply: true, // 对方发语音 → 回语音（失败退回文字）
-    voiceAlways: false // true = 所有回复都发语音
+    voiceAlways: false, // true = 所有回复都发语音
+    memes: true // 收藏聊到的表情包并允许回复时配图
   };
 }
 
@@ -242,6 +254,8 @@ function cleanReply(text) {
   let t = String(text || '').trim();
   // 模型决定不回
   if (!t || t === '[SKIP]' || /^\[skip\]/i.test(t)) return null;
+  t = t.replace(/\[图[:：][^\]]*\]/g, '').trim(); // 配图标记单独处理，这里剥掉
+  if (!t) return null;
   for (const q of ['"', "'", '「', '」', '“', '”']) {
     if (t.startsWith(q)) t = t.slice(1);
     if (t.endsWith(q)) t = t.slice(0, -1);
@@ -273,6 +287,130 @@ function imageDataUri(buf) {
   else if (buf[0] === 0x47 && buf[1] === 0x49) mime = 'image/gif';
   else if (buf.slice(0, 4).toString('latin1') === 'RIFF') mime = 'image/webp';
   return `data:${mime};base64,${buf.toString('base64')}`;
+}
+
+/* ------------------------------------------------------------------ */
+/* 表情包库：收藏白名单会话里出现的图，回复时可挑一张配上去              */
+/* ------------------------------------------------------------------ */
+
+const MEME_MAX_FILES = 300;
+const MEME_LIST_MAX = 25; // 提示词里最多带多少张（防 prompt 爆炸）
+const MEME_DESC_PROMPT =
+  '这是一张表情包/梗图。用不超过15个字概括它适合在什么情绪或场景下发（比如：无语了、看乐子、嘲讽拉满、可爱卖萌）。只输出那句话，别描述画面细节。';
+
+let memeDirCache = null;
+let memeCatalog = null; // { seq, items: [{ name, hash, desc, addedAt }] }
+
+function memeDir() {
+  if (memeDirCache) return memeDirCache;
+  const { app } = require('electron');
+  const base = app.isPackaged ? app.getPath('userData') : path.join(app.getAppPath(), '.data');
+  memeDirCache = path.join(base, 'memes');
+  fs.mkdirSync(memeDirCache, { recursive: true });
+  return memeDirCache;
+}
+
+function memeCatalogFile() {
+  return path.join(memeDir(), 'catalog.json');
+}
+
+function loadMemeCatalog() {
+  if (memeCatalog) return memeCatalog;
+  memeCatalog = { seq: 0, items: [] };
+  try {
+    if (fs.existsSync(memeCatalogFile())) {
+      memeCatalog = { ...memeCatalog, ...JSON.parse(fs.readFileSync(memeCatalogFile(), 'utf8')) };
+    }
+  } catch (err) {
+    dbg('[qq] 表情库目录损坏，重置：', err.message);
+  }
+  return memeCatalog;
+}
+
+function saveMemeCatalog() {
+  try {
+    const tmp = memeCatalogFile() + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(memeCatalog, null, 1), 'utf8');
+    fs.renameSync(tmp, memeCatalogFile());
+  } catch (err) {
+    dbg('[qq] 表情库目录写盘失败：', err.message);
+  }
+}
+
+function memeFile(name) {
+  // 只允许我们自己的命名格式，防路径穿越
+  return /^meme-\d+\.(png|jpg|gif|webp)$/.test(name) ? path.join(memeDir(), name) : null;
+}
+
+/** 收藏一张图（Buffer）。新图落盘并排队让视觉模型写用途描述；重复图跳过。异步不阻塞回复。 */
+async function collectMeme(buf) {
+  try {
+    if (!getCfg().memes || !buf || buf.length < 2000) return; // 太小的当垃圾图
+    const cat = loadMemeCatalog();
+    const hash = crypto.createHash('md5').update(buf).digest('hex');
+    if (cat.items.some((x) => x.hash === hash)) return;
+    let ext = 'jpg';
+    if (buf[0] === 0x89 && buf[1] === 0x50) ext = 'png';
+    else if (buf[0] === 0x47 && buf[1] === 0x49) ext = 'gif';
+    else if (buf.slice(0, 4).toString('latin1') === 'RIFF') ext = 'webp';
+    const name = `meme-${++cat.seq}.${ext}`;
+    fs.writeFileSync(path.join(memeDir(), name), buf);
+    const item = { name, hash, desc: '', addedAt: Date.now() };
+    cat.items.push(item);
+    // 超量删最老的（连文件一起删）
+    while (cat.items.length > MEME_MAX_FILES) {
+      const old = cat.items.shift();
+      try {
+        fs.unlinkSync(path.join(memeDir(), old.name));
+      } catch {
+        /* ignore */
+      }
+    }
+    saveMemeCatalog();
+    dbg('[qq] 收藏表情包:', name);
+    describeMeme(item); // 后台写描述，不阻塞
+  } catch (err) {
+    dbg('[qq] 收藏表情包失败：', err.message);
+  }
+}
+
+/** 视觉模型给表情包写一句话用途描述，写完落盘 */
+async function describeMeme(item) {
+  try {
+    const cfg = getCfg();
+    const llmCfg = config.getLLM();
+    if (!llmCfg || !llmCfg.apiKey) return;
+    const buf = fs.readFileSync(path.join(memeDir(), item.name));
+    const msg = await llm.chat({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: imageDataUri(buf) } },
+            { type: 'text', text: MEME_DESC_PROMPT }
+          ]
+        }
+      ],
+      config: { ...llmCfg, model: cfg.visionModel || VISION_MODEL_DEFAULT },
+      allowTools: false,
+      temperature: 0.3
+    });
+    item.desc = String(msg.content || '').trim().split('\n')[0].slice(0, 30);
+    saveMemeCatalog();
+    dbg('[qq] 表情包描述:', item.name, item.desc);
+  } catch (err) {
+    dbg('[qq] 表情包描述失败:', item && item.name, err.message);
+  }
+}
+
+/** 提示词用的表情包清单（有描述的按新到旧取一批） */
+function memeListText() {
+  const cat = loadMemeCatalog();
+  const list = cat.items
+    .filter((x) => x.desc && fs.existsSync(path.join(memeDir(), x.name)))
+    .sort((a, b) => b.addedAt - a.addedAt)
+    .slice(0, MEME_LIST_MAX);
+  return list.map((x) => `[图:${x.name}] = ${x.desc}`).join('\n');
 }
 
 function audioBase(llmCfg, tail) {
@@ -343,7 +481,7 @@ async function ttsToFile(text, cfg) {
 async function generateReply(historyTexts, incoming, imageUri, cfg) {
   const llmCfg = config.getLLM();
   if (!llmCfg || !llmCfg.enabled || !llmCfg.apiKey) {
-    return [null, '没有配置模型，无法自动生成回复'];
+    return [null, null, '没有配置模型，无法自动生成回复'];
   }
   const user = [];
   if (historyTexts && historyTexts.length) {
@@ -355,7 +493,10 @@ async function generateReply(historyTexts, incoming, imageUri, cfg) {
 
   const msg = await llm.chat({
     messages: [
-      { role: 'system', content: buildSystemPrompt(cfg.persona) },
+      {
+        role: 'system',
+        content: buildSystemPrompt(cfg.persona, cfg.memes ? memeListText() : '')
+      },
       {
         role: 'user',
         // 带图时用视觉模型一次调用同时看图和出回复，省一次往返
@@ -371,7 +512,11 @@ async function generateReply(historyTexts, incoming, imageUri, cfg) {
     allowTools: false,
     temperature: 1.0 // 高一点更活，太正经就往上加
   });
-  return [cleanReply(msg.content), ''];
+  // 拆出配图标记：[图:meme-x.ext]，其余走正常清洗
+  const raw = String(msg.content || '');
+  const memeTag = raw.match(/\[图[:：]\s*([^\]\s]+)\]/);
+  const memePath = memeTag ? memeFile(memeTag[1]) : null;
+  return [cleanReply(raw), memePath, ''];
 }
 
 /* ------------------------------------------------------------------ */
@@ -662,31 +807,35 @@ async function flushChat(qq) {
     }
   }
 
-  // 带图时图片本地下载转 base64，一次视觉调用直接出回复
+  // 带图时图片本地下载转 base64，一次视觉调用直接出回复；顺手收藏进表情包库
   let imageUri = null;
   if (imageUrl) {
     try {
-      imageUri = imageDataUri(await fetchBuffer(imageUrl));
+      const buf = await fetchBuffer(imageUrl);
+      imageUri = imageDataUri(buf);
+      collectMeme(buf).catch(() => {});
     } catch (err) {
       dbg('[qq]', name, '图片下载失败，改纯文字理解：', err.message);
     }
   }
 
   const ctx = (chatState(qq).ctx || []).slice(-CTX_PER_CHAT);
-  let reply;
+  let reply = null;
+  let memePath = null;
   try {
-    const [gen, err] = await generateReply(ctx, incoming, imageUri, getCfg());
-    if (!gen) {
+    const [gen, meme, err] = await generateReply(ctx, incoming, imageUri, getCfg());
+    if (!gen && !meme) {
       dbg('[qq]', name, '生成放弃：', err || '模型输出为空/标记跳过');
       return;
     }
     reply = gen;
+    memePath = meme && fs.existsSync(meme) ? meme : null;
   } catch (err) {
     dbg('[qq]', name, '生成失败：', err.message);
     return;
   }
 
-  if (isDuplicate(getCfg(), qq, reply)) {
+  if (reply && isDuplicate(getCfg(), qq, reply)) {
     dbg('[qq]', name, '回复与最近重复，放弃本次');
     return;
   }
@@ -695,7 +844,7 @@ async function flushChat(qq) {
   const voiceReq = /发(条|个|个)?语音|语音回|用语音|语音说|语音呢|说句话听听/.test(incoming);
   const wantVoice = !!getCfg().voiceReply && !!(voiceUrl || getCfg().voiceAlways || voiceReq);
   let sentVoice = false;
-  if (wantVoice) {
+  if (wantVoice && reply) {
     try {
       const file = await ttsToFile(reply, getCfg());
       await client.sendRecord(isGroup, targetId, file);
@@ -705,7 +854,23 @@ async function flushChat(qq) {
       dbg('[qq]', name, '语音发送失败，退回文字：', err.message);
     }
   }
-  if (!sentVoice) {
+
+  // 配图：模型挑了表情包就发（文字和图拼一条消息；语音场景图单独发）
+  let sentMeme = false;
+  if (memePath) {
+    try {
+      const segs = [];
+      if (reply && !sentVoice) segs.push({ type: 'text', data: { text: reply } });
+      segs.push({ type: 'image', data: { file: `file:///${memePath.replace(/\\/g, '/')}` } });
+      await client.sendSegments(isGroup, targetId, segs);
+      sentMeme = true;
+      dbg('[qq] 已发送配图 ->', name, path.basename(memePath));
+    } catch (err) {
+      dbg('[qq]', name, '配图发送失败：', err.message);
+    }
+  }
+
+  if (!sentVoice && !sentMeme) {
     try {
       await (isGroup
         ? client.sendGroupText(targetId, reply)
@@ -717,13 +882,13 @@ async function flushChat(qq) {
     }
   }
 
-  guardRecord(getCfg(), qq, reply);
+  guardRecord(getCfg(), qq, reply || '');
   const cs = chatState(qq);
-  cs.ctx = [...ctx, `对方：${incoming.replace(/\n/g, '；')}`, `我：${reply}`].slice(-CTX_PER_CHAT);
+  cs.ctx = [...ctx, `对方：${incoming.replace(/\n/g, '；')}`, `我：${reply || '（发了个表情包）'}`].slice(-CTX_PER_CHAT);
   saveState();
 
-  say(`已替你回复 ${name}${sentVoice ? '（语音）' : ''}：「${reply}」`);
-  dbg('[qq] 已发送 ->', name, reply);
+  say(`已替你回复 ${name}${sentVoice ? '（语音）' : ''}${sentMeme ? '（带图）' : ''}：「${reply || '[表情包]'}」`);
+  dbg('[qq] 已发送 ->', name, reply || '[表情包]');
 }
 
 /* ------------------------------------------------------------------ */
@@ -759,5 +924,5 @@ module.exports = {
   shutdown,
   setNotifier,
   // 内部函数导出仅供测试
-  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT }
+  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, loadMemeCatalog, saveMemeCatalog, memeDir }
 };

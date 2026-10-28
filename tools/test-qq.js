@@ -81,6 +81,8 @@ check('cleanReply 空串拒回', _internals.cleanReply('   ') === null);
 check('cleanReply 截断 120', _internals.cleanReply('啊'.repeat(300)).length <= 120);
 check('cleanReply 只取第一行', _internals.cleanReply('第一句\n第二句') === '第一句');
 check('normalize 去标点空白', _internals.normalize('好 的，没！问题~') === '好的没问题');
+check('cleanReply 剥配图标记', _internals.cleanReply('哈哈 [图:meme-1.png]') === '哈哈');
+check('cleanReply 纯配图标记为空', _internals.cleanReply('[图:meme-1.png]') === null);
 
 const cfgStub = { whitelist: [{ qq: 10001, name: '老王' }] };
 check('白名单命中', _internals.matchWhitelist(cfgStub, { user_id: 10001 }) === '老王');
@@ -276,9 +278,52 @@ async function main() {
       const gSent = received.find((r) => r.action === 'send_group_msg');
       check('群回复发给正确的群', gSent && String(gSent.params.group_id) === '888');
 
+      // 用例 J：模型回配图标记 → 文字+图片段发出（表情包库测试）
+      // 备份并清空表情库目录，造一张假表情包
+      const MEMES_DIR = path.join(DATA_DIR, 'memes');
+      const MEME_CATALOG = path.join(MEMES_DIR, 'catalog.json');
+      const memesBackup = fs.existsSync(MEME_CATALOG) ? fs.readFileSync(MEME_CATALOG, 'utf8') : null;
+      fs.rmSync(MEMES_DIR, { recursive: true, force: true });
+      fs.mkdirSync(MEMES_DIR, { recursive: true });
+      fs.writeFileSync(path.join(MEMES_DIR, 'meme-1.png'), Buffer.from('fakepngdata-'.repeat(300)));
+      const cat = _internals.loadMemeCatalog();
+      cat.seq = 1;
+      cat.items = [{ name: 'meme-1.png', hash: 'x', desc: '无语时用', addedAt: Date.now() }];
+      _internals.saveMemeCatalog();
+      check('表情包清单可读', _internals.memeListText().includes('meme-1.png'));
+
+      // llm 桩临时改成只回配图标记（纯图无文字）
+      const llmPath = require.resolve(path.join(ROOT, 'src/core/llm.js'));
+      const origChat = require.cache[llmPath].exports.chat;
+      require.cache[llmPath].exports.chat = async () => ({ content: '[图:meme-1.png]' });
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'private', sub_type: 'friend',
+        user_id: 10001, message_id: 400, message: [{ type: 'text', data: { text: '无语住了' } }]
+      });
+      const imgSent = received.filter((r) => r.action === 'send_private_msg').pop();
+      check(
+        '配图回复发出图片段',
+        imgSent && imgSent.params.message.some((s) => s.type === 'image'),
+        imgSent && JSON.stringify(imgSent.params.message)
+      );
+      check(
+        '纯图回复不带空文字段',
+        imgSent && imgSent.params.message.every((s) => s.type !== 'text' || (s.data.text || '').trim()),
+        imgSent && JSON.stringify(imgSent.params.message)
+      );
+      require.cache[llmPath].exports.chat = origChat; // 还原桩
+
       bot.shutdown();
       wss.close();
     } finally {
+      // 恢复表情库目录
+      try {
+        fs.rmSync(path.join(DATA_DIR, 'memes'), { recursive: true, force: true });
+        if (memesBackup !== null) {
+          fs.mkdirSync(path.join(DATA_DIR, 'memes'), { recursive: true });
+          fs.writeFileSync(path.join(DATA_DIR, 'memes', 'catalog.json'), memesBackup, 'utf8');
+        }
+      } catch { /* ignore */ }
       // 恢复真实配置与状态
       if (configBackup !== null) fs.writeFileSync(CONFIG_FILE, configBackup, 'utf8');
       else if (fs.existsSync(CONFIG_FILE)) fs.unlinkSync(CONFIG_FILE);

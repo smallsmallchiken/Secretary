@@ -205,6 +205,21 @@ class OneBotClient {
     });
   }
 
+  /** 发送自定义消息段（文字+图片混发等）。segments: [{type,data}] */
+  sendSegments(isGroup, targetId, segments) {
+    return this.callApi(isGroup ? 'send_group_msg' : 'send_private_msg', {
+      [isGroup ? 'group_id' : 'user_id']: targetId,
+      message: segments
+    });
+  }
+
+  /** 发送本地图片文件（NapCat 支持本地 file:// 路径，自动上传成图片消息） */
+  sendImage(isGroup, targetId, filePath) {
+    return this.sendSegments(isGroup, targetId, [
+      { type: 'image', data: { file: `file:///${String(filePath).replace(/\\/g, '/')}` } }
+    ]);
+  }
+
   /** 登录信息（QQ 号 + 昵称） */
   getLoginInfo() {
     return this.callApi('get_login_info');
