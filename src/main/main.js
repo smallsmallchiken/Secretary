@@ -10,6 +10,7 @@ const qqbot = require('../core/qq/bot');
 const wxbot = require('../core/wechat/bot');
 const windows = require('./windows');
 const wander = require('./wander');
+const napcat = require('./napcat');
 const { createTray, refreshTray } = require('./tray');
 const { registerShortcuts, unregisterShortcuts } = require('./shortcuts');
 const { dbg } = require('../core/debug');
@@ -398,6 +399,10 @@ app.whenReady().then(() => {
   createTray();
   registerShortcuts();
   wander.start();
+
+  // NapCat（QQ 自动回复的"另一头"）没在跑就替用户拉起来，快速登录 + 开 3001 WS。
+  // 不拉的话：开机只有桌宠自己，NapCat 不会自己起来，QQ 会一直"连接中"。
+  napcat.init();
 
   // QQ 自动回复：上次开着就恢复，收发结果通过气泡播报
   qqbot.init((text) => {
