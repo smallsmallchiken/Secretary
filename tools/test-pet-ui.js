@@ -279,7 +279,9 @@ function checkSnapPetSize() {
   const win = windows.createPetWindow();
   const target = windows.sizeForScale(windows.petScale());
 
-  // 被改大：钉回目标尺寸
+  // 被改大：钉回目标尺寸。
+  // 注意这个进程和真桌宠进程共用 .data/debug.log，下面这次「改大」会在日志里
+  // 留下一条 [snap] 尺寸被改动 ...x... -> 目标，是自检故意造的，不是真漂移。
   win.setBounds({ x: 200, y: 200, width: target.width + 240, height: target.height + 180 });
   const restored = windows.snapPetSize();
   const after = win.getBounds();
