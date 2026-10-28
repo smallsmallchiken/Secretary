@@ -34,6 +34,7 @@ let cached = {
   pid: null,
   replyToAll: true,
   groupMode: 'all',
+  whitelistCount: 0,
   persona: ''
 };
 let lastDiscoverAt = null;
@@ -166,6 +167,7 @@ function refresh(force = false) {
       pid,
       replyToAll: cfg.replyToAll !== false,
       groupMode: cfg.groupMode || 'all',
+      whitelistCount: Array.isArray(cfg.whitelist) ? cfg.whitelist.length : 0,
       persona: cfg.persona || ''
     };
     return cached;
@@ -180,6 +182,50 @@ function status() {
   return { ...cached };
 }
 
+/** PowerShell 单引号字符串转义（路径里可能带单引号，虽然少见）。 */
+function psQuote(s) {
+  return "'" + String(s).replace(/'/g, "''") + "'";
+}
+
+/**
+ * 用 WMI 创建进程，而不是 spawn。
+ *
+ * 直接 spawn 出来的进程挂在 Electron 的进程树/job 里，桌宠一退出（甚至只是重启）
+ * 就被一起收走 —— 实测确认过：关掉主进程后 python 立刻没了。
+ * 走 Win32_Process.Create，父级是 WmiPrvSE，跟桌宠彻底脱钩，重启桌宠也不影响值守。
+ *
+ * 返回新进程 pid（这里是 cmd 的 pid，真正的 python pid 靠 discoverPid 再认一次）。
+ */
+function startViaWmi() {
+  return new Promise((resolve) => {
+    // cmd /c 负责把输出追加进 live.log；首尾都加引号是 cmd 的怪癖，不加会把前面的引号吃掉
+    const inner = `"${PY}" -u "${SCRIPT}" watch --live >> "${LOG}" 2>&1`;
+    const cmdline = `cmd /c "${inner}"`;
+    const ps =
+      '$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create ' +
+      `-Arguments @{ CommandLine = ${psQuote(cmdline)}; CurrentDirectory = ${psQuote(ROOT)} }; ` +
+      'Write-Output ("{0}|{1}" -f $r.ProcessId, $r.ReturnValue)';
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps],
+      { timeout: 20000, windowsHide: true },
+      (err, stdout) => {
+        if (err) {
+          dbg('[wx] WMI 启动失败：', err.message.split('\n')[0]);
+          return resolve(null);
+        }
+        const [pidStr, rc] = String(stdout).trim().split('|');
+        const pid = parseInt(pidStr, 10);
+        if (String(rc).trim() !== '0' || !Number.isFinite(pid)) {
+          dbg('[wx] WMI 启动返回异常：pid=', pidStr, 'rc=', rc);
+          return resolve(null);
+        }
+        resolve(pid);
+      }
+    );
+  });
+}
+
 async function start() {
   await refresh(true);
   if (!cached.available) {
@@ -189,58 +235,59 @@ async function start() {
   if (cached.running) {
     return { ok: true, message: '已经在跑了' };
   }
-  let fd = 'ignore';
-  try {
-    fd = fs.openSync(LOG, 'a');
-  } catch (err) {
-    dbg('[wx] 打开 live.log 失败（改成丢弃输出）：', err.message);
-  }
-  let child;
-  try {
-    child = spawn(PY, ['-u', SCRIPT, 'watch', '--live'], {
-      cwd: ROOT,
-      detached: true,
-      windowsHide: true,
-      stdio: ['ignore', fd, fd]
-    });
-  } catch (err) {
-    say('微信自动回复启动失败：' + err.message);
-    return { ok: false, message: err.message };
-  }
-  if (typeof fd === 'number') {
+
+  let child = null;
+  const wmiPid = await startViaWmi();
+  if (!wmiPid) {
+    // 退路：普通 spawn。能用，但桌宠退出时会被一起带走
+    let fd = 'ignore';
     try {
-      fs.closeSync(fd); // 父进程不用留着，子进程自己持有句柄
-    } catch {
-      /* ignore */
+      fd = fs.openSync(LOG, 'a');
+    } catch (err) {
+      dbg('[wx] 打开 live.log 失败（改成丢弃输出）：', err.message);
     }
+    try {
+      child = spawn(PY, ['-u', SCRIPT, 'watch', '--live'], {
+        cwd: ROOT,
+        detached: true,
+        windowsHide: true,
+        stdio: ['ignore', fd, fd]
+      });
+    } catch (err) {
+      say('微信自动回复启动失败：' + err.message);
+      return { ok: false, message: err.message };
+    }
+    if (typeof fd === 'number') {
+      try {
+        fs.closeSync(fd); // 父进程不用留着，子进程自己持有句柄
+      } catch {
+        /* ignore */
+      }
+    }
+    // spawn 的失败是异步 emit 的，不监听会直接崩主进程
+    child.on('error', (err) => {
+      dbg('[wx] 子进程错误：', err.message);
+      clearPid();
+      say('微信自动回复启动失败：' + err.message);
+    });
+    child.unref();
   }
-  // spawn 的失败是异步 emit 的，不监听会直接崩主进程
-  child.on('error', (err) => {
-    dbg('[wx] 子进程错误：', err.message);
-    clearPid();
-    say('微信自动回复启动失败：' + err.message);
-  });
-  child.on('exit', (code) => {
-    dbg('[wx] 子进程退出，code =', code);
-    clearPid();
-    refresh(true).catch(() => {});
-  });
-  child.unref();
-  writePid(child.pid);
-  // 直接信这个 pid，别去问系统进程表 —— 刚拉起来的进程可能还没进 WMI 查询窗口
-  lastDiscoverAt = { at: Date.now(), pid: child.pid };
-  dbg('[wx] 已拉起，pid =', child.pid);
+
+  dbg('[wx] 已拉起，pid =', wmiPid || (child && child.pid));
+  writePid(wmiPid || (child && child.pid));
 
   // 起来就死的常见原因是 py312 环境坏了、或者另一个实例占着，等一下确认
-  await new Promise((r) => setTimeout(r, 800));
-  if (!alive(child.pid)) {
+  await new Promise((r) => setTimeout(r, 900));
+  const realPid = (await discoverPid()) || wmiPid || (child && child.pid);
+  lastDiscoverAt = { at: Date.now(), pid: realPid || null };
+  if (!realPid || !alive(realPid)) {
     clearPid();
     lastDiscoverAt = null;
     cached = { ...cached, running: false, pid: null };
     say('微信自动回复没起来，详细报错看 wechat-bot/live.log 末尾');
     return { ok: false, message: '进程启动后立刻退出' };
   }
-  cached = { ...cached, running: true, pid: child.pid };
+  cached = { ...cached, running: true, pid: realPid };
   say('微信自动回复已开启，开始值守未读会话');
   return { ok: true };
 }

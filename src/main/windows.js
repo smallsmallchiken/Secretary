@@ -486,7 +486,7 @@ function stepPetScale(factor) {
 /* 自绘右键菜单（原生 Menu 没法做透明，这里用透明窗口画）               */
 /* ------------------------------------------------------------------ */
 
-const MENU_W = 240;
+const MENU_W = 264;
 let menuWin = null;
 let menuShownAt = 0;
 

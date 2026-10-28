@@ -269,22 +269,36 @@ function buildMenuItems() {
   const qqSt = qqbot.status();
   const wxSt = wxbot.status();
 
+  // QQ 的白名单条目分「好友」和「群」两种，混着数成「N人」会让人看不懂，
+  // 而且开着 allFriends 时名单根本不是生效范围（所有好友都回）。
+  const qqWl = qqSt.whitelist || [];
+  const qqFriends = qqWl.filter((x) => x && x.qq).length;
+  const qqGroups = qqWl.filter((x) => x && x.group).length;
+  const qqScope = qqSt.allFriends
+    ? qqGroups
+      ? `全好友+${qqGroups}群`
+      : '全好友'
+    : [qqFriends ? `${qqFriends}人` : '', qqGroups ? `${qqGroups}群` : ''].filter(Boolean).join('+') || '空';
+  const qqHint = qqSt.running
+    ? `值守中(${qqScope})`
+    : qqSt.enabled
+      ? '已启用(未连上)'
+      : '关';
+
+  // 微信这边是全回模式（replyToAll），没有固定名单可数，写「全部私聊」比空着清楚
+  const wxScope = wxSt.replyToAll
+    ? wxSt.groupMode === 'all'
+      ? '私聊+群'
+      : '全部私聊'
+    : `${wxSt.whitelistCount}个会话`;
+  const wxHint = !wxSt.available ? '未配置' : wxSt.running ? `值守中(${wxScope})` : '关';
+
   return [
     { id: 'wander_toggle', label: '自己漫步', hint: wanderOn ? '开' : '关' },
     { id: 'walk', label: '自己溜达一圈' },
     { sep: true },
-    {
-      id: 'qq_toggle',
-      label: 'QQ 自动回复',
-      hint: qqSt.running ? `值守中(${qqSt.whitelistCount}人)` : qqSt.enabled ? '已启用(未连上)' : '关',
-      danger: qqSt.running
-    },
-    {
-      id: 'wx_toggle',
-      label: '微信自动回复',
-      hint: !wxSt.available ? '未配置' : wxSt.running ? '值守中' : '关',
-      danger: wxSt.running
-    },
+    { id: 'qq_toggle', label: 'QQ 自动回复', hint: qqHint, danger: qqSt.running },
+    { id: 'wx_toggle', label: '微信自动回复', hint: wxHint, danger: wxSt.running },
     { sep: true },
     { id: 'chat', label: '说点什么…', hint: 'Alt+W' },
     { id: 'settings', label: '设置' },
