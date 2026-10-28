@@ -29,8 +29,9 @@ const PERSONA_DEFAULT = '凶巴巴的傲娇小丫头：嘴硬心软、爱损人�
 
 // 去人机味思路（参考 github 上多个 QQ 机器人项目的实践）：
 //   小模型规则越少越听话；示范（few-shot）比规则管用得多；温度拉高（1.0）。
-function buildSystemPrompt(personaText, memeList) {
+function buildSystemPrompt(personaText, memeList, opts = {}) {
   const persona = (personaText || '').trim() || PERSONA_DEFAULT;
+  const isGroup = !!opts.isGroup;
   const personaLine =
     persona === PERSONA_DEFAULT
       ? '我这个人设是：' + persona
@@ -45,12 +46,19 @@ ${memeList.trim()}
 - 大多数时候别配图，硬凑很尬；一次最多一张
 - 只能从上面清单里挑，别的图你没有`
       : '';
+  const groupBlock = isGroup
+    ? `\n\n你现在在一个群里。看群聊记录时注意：
+- 每条前面的方括号只是说话人标签，唯一作用是分清「谁说的」，别的一概不代表：不要拿它称呼任何人，不要根据它猜性别、年龄、身份、长相，也不要评论这些名字
+- [我] 是你自己之前说的话
+- 群友之间互相对聊、没你什么事的时候，别插嘴，直接输出 [SKIP]
+- 只有被 @、被点名、别人接你的话、或明确在问你意见时才开口；开口就随便说一句，别像总结发言，也别一口气回复好几个人`
+    : '';
   return `你在 QQ 上替「我」回消息。${personaLine}。对方不知道背后是谁，每句都要像本人随手敲的。
 
 硬规矩只有三条：
 1. 只输出要发的那句话：不要旁白、括号动作、引号、前缀，emoji 最多一个
 2. 一两句话完事，长短参差，有时一两个字也是正经回复
-3. 广告、诈骗、群发 → 输出 [SKIP]
+3. 广告、诈骗、群发、别人在聊跟你无关的事 → 输出 [SKIP]${groupBlock}
 
 说话全靠找下面这些例子的感觉（✗ 是假人腔禁止；✓ 才是对的）：
 「在吗」→ ✓「说」/「又咋了」/「在啊咋」 ✗「我在的，请问有什么事吗」
@@ -61,6 +69,8 @@ ${memeList.trim()}
 （发了个「哈哈大笑」表情）→ ✓「笑屁啊」「笑什么 笑」 ✗「哈哈哈哈，看到你笑我也很开心」
 「你是女孩子吗」→ ✓「问这么干嘛」「是啊咋 你想挨打？」 ✗「是呀，怎么突然问这个」
 「帮我看看这个」+图 → ✓「哦 就这？」「看不懂 你发的什么玩意」 ✗「好的，我帮你看一下」
+（群友 A 问 B：你昨天几点睡的；B 回：两点）→ ✓「[SKIP]」 ✗「两点也太晚了吧，注意身体」
+（群友互相约饭，没叫你）→ ✓「[SKIP]」 ✗「我也想去」
 
 书面语、客服腔（请问/有什么可以帮到你）、心理咨询腔（我理解你的感受）、关怀模板（辛苦了/多喝热水/早点休息/别太勉强）、总结升华（愿你/加油哦/相信你可以）——出现就重写。
 全程温温柔柔没有情绪起伏也算失败：要么损、要么不耐烦、要么兴奋，得有态度。
@@ -69,21 +79,27 @@ ${memeList.trim()}
 - 图片/表情包以（附图：…）（发了个「xx」表情）标注在消息里，照常接话
 - 语音会转成文字给你，就当对方打的字
 - 不确定的事别替本人答应：说「等我看下」「回头再说吧」
-- 群里随手插嘴，别正式，别主动喊人，别当复读机
+- 群里被人叫到就随口应一句，别正式，别主动喊人，别当复读机
 - 有多条消息一起给你时，要像真人攒着看完一起回，别逐条复述
 
 最后重申：你的性格是：${persona}。每句回复都要从这个性格出发。${memeBlock}`;
 }
 
-/** 群友要求改性格时的识别提示词 */
-const PERSONA_DETECT_PROMPT = `判断用户消息是否在要求「你」改变性格、语气或说话方式（例如：你能不能温柔点、以后高冷一点、别骂人、说话正经点、你可爱一点行不行）。
-只在明确要求改变说话风格/人设时才算。单纯聊到"性格"这个词、聊别人性格、或只是情绪表达都不算。
-只输出 JSON，不要其他内容：
-{"change": true, "persona": "用第三人称简述新性格，20字内，保留可读的说话风格要点（比如：温柔礼貌，不骂人，说话轻声细语带点关心）"}
-不算时输出 {"change": false, "persona": ""}`;
+/** 群友要求改性格时的识别 + 人设演进提示词。
+ *  不是简单覆盖：给模型「当前人设」和「新要求」，让它合并成完整人设，
+ *  这样多次调教可以叠加（先温柔，再加一句爱用叠词，两样都留着）。 */
+const PERSONA_DETECT_PROMPT = `你是 QQ 群机器人的性格管理员。输入分两块：【当前人设】和【群友刚说的话】。
+判断这句话是不是在要求这个机器人改变性格、语气或说话方式（例如：你能不能温柔点、以后高冷一点、别骂人、说话正经点、你可爱一点行不行、别老阴阳怪气）。
+只在明确要求改变说话风格/人设时才算。单纯聊到"性格"这个词、聊别人的性格、夸它一句、或者只是情绪表达都不算。
+情况分三种，只输出 JSON，不要其他内容：
+1) 要改人设 → {"change": true, "persona": "合并后的完整人设，第三人称，80字内。把当前人设里没被这次要求改动的部分原样保留，只改被要求的地方"}
+2) 要求恢复默认/忘掉之前的调教 → {"change": true, "reset": true, "persona": ""}
+3) 不算 → {"change": false, "persona": ""}`;
 
 const REPLY_MAX_CHARS = 120;
 const CTX_PER_CHAT = 6; // 每会话保留的上下文条数（一问一答算两条）
+const MEMORY_LIMIT_DEFAULT = 120; // 每个群保留的聊天记录条数
+const MEMORY_CONTEXT_DEFAULT = 24; // 每次喂给模型多少条群聊记录
 const CLEAN_PREFIX = ['回复：', '回复:', '可以这样回：'];
 
 // 图片/语音相关模型与音色（SiliconFlow，同一个 API Key）
@@ -128,7 +144,13 @@ function defaultConfig() {
     asrModel: ASR_MODEL_DEFAULT,
     voiceReply: true, // 对方发语音 → 回语音（失败退回文字）
     voiceAlways: false, // true = 所有回复都发语音
-    memes: true // 收藏聊到的表情包并允许回复时配图
+    memes: true, // 收藏聊到的表情包并允许回复时配图
+    // 群聊记忆：每个群保留多少条聊天记录当上下文（落盘 qq-state.json）
+    memoryLimit: 120,
+    // 群聊上下文喂给模型多少条
+    memoryContext: 24,
+    // 除了被 @ / 回复它自己 / 叫它的 QQ 昵称，消息里出现这些词也算在叫它
+    wakeWords: []
   };
 }
 
@@ -181,6 +203,46 @@ function saveState() {
 function chatState(qq) {
   const s = loadState();
   return s.chats[qq] || (s.chats[qq] = { lastSentAt: 0, consecutive: 0, recentTexts: [], lastMsgId: 0, ctx: [] });
+}
+
+/* ------------------------------------------------------------------ */
+/* 群聊记忆：所有群聊消息（含没回的）都记下来当上下文                     */
+/* ------------------------------------------------------------------ */
+
+/** who 只是说话人标签（群名片/昵称），仅用于区分谁在说，不参与理解 */
+function memoryOf(qq) {
+  const c = chatState(qq);
+  return (c.memory = c.memory || []);
+}
+
+function pushMemory(qq, who, text, limit) {
+  const mem = memoryOf(qq);
+  mem.push({
+    at: Date.now(),
+    who: String(who || '群友').slice(0, 20),
+    text: String(text || '').slice(0, 300)
+  });
+  const cap = limit || MEMORY_LIMIT_DEFAULT;
+  if (mem.length > cap) mem.splice(0, mem.length - cap);
+}
+
+/** 最近 n 条记忆拼成给模型看的文本，每行 `[说话人] 内容` */
+function memoryText(qq, n) {
+  return memoryOf(qq)
+    .slice(-(n || MEMORY_CONTEXT_DEFAULT))
+    .map((m) => `[${m.who}] ${m.text}`)
+    .join('\n');
+}
+
+/** 调教记录（谁、要求了什么、变成什么样），最近的排前面 */
+function personaLog(qq, entry) {
+  const s = loadState();
+  s.personaLog = s.personaLog || [];
+  if (entry) {
+    s.personaLog.unshift({ at: Date.now(), chat: qq, ...entry });
+    s.personaLog = s.personaLog.slice(0, 30);
+  }
+  return s.personaLog;
 }
 
 /* ------------------------------------------------------------------ */
@@ -478,24 +540,36 @@ async function ttsToFile(text, cfg) {
   return file;
 }
 
-async function generateReply(historyTexts, incoming, imageUri, cfg) {
+async function generateReply({ history, incoming, imageUri, cfg, isGroup, addressed }) {
   const llmCfg = config.getLLM();
   if (!llmCfg || !llmCfg.enabled || !llmCfg.apiKey) {
     return [null, null, '没有配置模型，无法自动生成回复'];
   }
   const user = [];
-  if (historyTexts && historyTexts.length) {
-    user.push('最近的聊天记录：\n' + historyTexts.join('\n'));
+  if (isGroup) {
+    // 群聊给整段记忆（最后一条就是刚发的），让模型自己判断该不该接话
+    if (history) {
+      user.push(`群里最近的聊天记录（每行开头的方括号只是说话人标签，只用来区分谁在说，不带别的含义）：\n${history}`);
+    }
+    user.push(
+      addressed
+        ? '最后一条是刚刚发出来的，而且是在直接叫你（@ 了你 / 点了你的名 / 回你的话）——必须接一句。'
+        : '最后一条是刚刚发出来的。如果这只是群友之间在互相聊、没你什么事，输出 [SKIP] 别插嘴；如果确实在问你或者点了你，就接一句。'
+    );
+  } else {
+    if (history) {
+      user.push('最近的聊天记录：\n' + history);
+    }
+    // 私聊不给对方名字：模型不需要知道对方叫什么
+    user.push(`对方刚发来的消息：${incoming}\n\n请直接给出要回复的那句话。`);
   }
-  // 不给发言人名字/网名：模型不需要知道对方叫什么，避免拿名字称呼对方或被网名带偏语气
-  user.push(`对方刚发来的消息：${incoming}\n\n请直接给出要回复的那句话。`);
   const userText = user.join('\n\n');
 
   const msg = await llm.chat({
     messages: [
       {
         role: 'system',
-        content: buildSystemPrompt(cfg.persona, cfg.memes ? memeListText() : '')
+        content: buildSystemPrompt(cfg.persona, cfg.memes ? memeListText() : '', { isGroup })
       },
       {
         role: 'user',
@@ -572,7 +646,11 @@ async function start() {
         client
           .getLoginInfo()
           .then((info) => {
-            if (client) client.selfId = info && info.user_id;
+            if (client) {
+              client.selfId = info && info.user_id;
+              // 昵称也当唤醒词用（群里有人直接喊这个名）
+              client.nickname = (info && info.nickname) || '';
+            }
             dbg('[qq] 登录账号:', info && info.user_id, info && info.nickname);
           })
           .catch(() => {});
@@ -631,14 +709,18 @@ async function handleEvent(event) {
 
 const pendingChats = new Map(); // qq -> { timer, items: [] }
 
-/** 群友要求改性格：关键词粗筛 + LLM 精判。命中返回新人设文本，否则 null */
-async function detectPersonaChange(text) {
+/** 群友要求改性格：关键词粗筛 + LLM 精判。命中返回 { reset, persona }，否则 null。
+ *  人设是「演进式」的：把当前人设交给模型，只改被要求的部分，多次调教可以叠加。 */
+async function detectPersonaChange(text, currentPersona) {
   const llmCfg = config.getLLM();
   if (!llmCfg || !llmCfg.apiKey) return null;
   const msg = await llm.chat({
     messages: [
       { role: 'system', content: PERSONA_DETECT_PROMPT },
-      { role: 'user', content: String(text).slice(0, 300) }
+      {
+        role: 'user',
+        content: `【当前人设】${currentPersona || PERSONA_DEFAULT}\n【群友刚说的话】${String(text).slice(0, 300)}`
+      }
     ],
     config: llmCfg,
     allowTools: false,
@@ -648,7 +730,11 @@ async function detectPersonaChange(text) {
     const m = String(msg.content || '').match(/\{[\s\S]*\}/);
     if (!m) return null;
     const d = JSON.parse(m[0]);
-    if (d.change && d.persona && String(d.persona).trim()) return String(d.persona).trim().slice(0, 120);
+    if (!d.change) return null;
+    if (d.reset) return { reset: true, persona: null };
+    const p = String(d.persona || '').trim();
+    if (!p) return null;
+    return { reset: false, persona: p.slice(0, 160) };
   } catch {
     /* JSON 解析失败当没识别到 */
   }
@@ -695,6 +781,8 @@ async function onMessage(event) {
   const imageUrls = [];
   const voiceUrls = [];
   const faceMarks = [];
+  let atMe = false; // @ 了机器人
+  let replyMe = false; // 回复的是机器人的消息
   if (Array.isArray(event.message)) {
     for (const seg of event.message) {
       if (seg.type === 'text') {
@@ -705,6 +793,15 @@ async function onMessage(event) {
         voiceUrls.push(seg.data.url); // 语音消息
       } else if (seg.type === 'face' && seg.data) {
         faceMarks.push(FACE_NAMES[seg.data.id] || `表情#${seg.data.id}`);
+      } else if (seg.type === 'at' && seg.data) {
+        const target = String(seg.data.qq || '');
+        if (target && target !== 'all' && client && client.selfId && target === String(client.selfId)) {
+          atMe = true;
+        }
+      } else if (seg.type === 'reply' && seg.data && seg.data.id) {
+        // 引用回复：回的是不是机器人说过的话
+        const rid = Number(seg.data.id);
+        if ((c.sentMsgIds || []).includes(rid)) replyMe = true;
       }
     }
     text = text.trim();
@@ -714,6 +811,13 @@ async function onMessage(event) {
   // 纯视频/文件等没有可识别内容的：不猜，不回
   if (!text && !imageUrls.length && !faceMarks.length && !voiceUrls.length) return;
 
+  // 群聊里判断是不是在叫它：@ / 引用回复 / 喊昵称或唤醒词
+  const nick = (client && client.nickname) || '';
+  const wakeHit = [...(cfg.wakeWords || []), nick]
+    .filter(Boolean)
+    .some((w) => String(w).trim() && text.includes(String(w).trim()));
+  const addressed = atMe || replyMe || wakeHit;
+
   const item = {
     text,
     imageUrls,
@@ -722,7 +826,12 @@ async function onMessage(event) {
     isGroup,
     targetId,
     qq,
-    name
+    name,
+    // 只当说话人标签用（区分谁在说），不参与语义理解
+    speaker: isGroup
+      ? String((event.sender && (event.sender.card || event.sender.nickname)) || `群友${event.user_id}`).slice(0, 20)
+      : '',
+    addressed
   };
 
   // 入队攒批：等 batchWaitMs，看对方还有没有下一条
@@ -751,8 +860,9 @@ async function flushChat(qq) {
   const { isGroup, targetId, name } = first;
   const cfg = getCfg();
 
-  // 逐条拼 incoming：语音转文字、表情标注，群聊带发言人
+  // 逐条整理：语音转文字、表情标注，群聊带说话人标签
   const parts = [];
+  const records = []; // 这一批消息的「谁说了什么」，用于写群记忆
   const faceMarksAll = [];
   let voiceUrl = null;
   let imageUrl = null;
@@ -776,13 +886,19 @@ async function flushChat(qq) {
       const marks = it.faceMarks.join('、');
       piece = piece ? `${piece}（${marks}的表情）` : `（发了个「${marks}」表情）`;
     }
-    // 不带发言人网名，直接给内容
-    if (piece) parts.push(piece);
+    if (!piece && it.imageUrls.length) piece = '（图片）';
+    if (!piece) piece = '（语音，没听清）';
+    records.push({ who: it.isGroup ? it.speaker || '群友' : '对方', text: piece });
+    parts.push(piece);
   }
-  let incoming = parts.join('\n');
-  if (faceMarksAll.length && !parts.length) incoming = `（发了个「${faceMarksAll.join('、')}」表情）`;
-  if (imageUrl && !incoming) incoming = '（发了一张图片）';
-  if (!incoming && !imageUrl) return;
+  const incoming = parts.join('\n');
+  if (!incoming) return;
+
+  // 群聊记忆：所有群消息都记（哪怕这次不回），这样它知道群里之前聊过什么
+  if (isGroup) {
+    for (const r of records) pushMemory(qq, r.who, r.text, cfg.memoryLimit);
+    saveState();
+  }
 
   const [ok, why] = guardCheck(cfg, qq);
   if (!ok) {
@@ -793,14 +909,20 @@ async function flushChat(qq) {
   say(`QQ 收到 ${name} 的消息${items.length > 1 ? `（攒了 ${items.length} 条）` : ''}：「${incoming.slice(0, 40).replace(/\n/g, ' / ')}${incoming.length > 40 ? '…' : ''}」，正在想怎么回`);
 
   // 群友/私聊对象要求改性格：关键词粗筛（放宽，宁可多问一次 LLM 也别漏掉调教）+ LLM 精判，
-  // 命中就持久化并当场生效。QQ 性格是独立配置（qq.persona），只被这里改。
+  // 命中就持久化并当场生效。QQ 性格是独立配置（qq.persona），只被这里改，且是「演进式」的。
   if (/性格|人设|语气|口吻|说话|风格|方式|温柔|可爱|凶|高冷|傲娇|礼貌|正经|热情|像人|像真|机器人/.test(incoming)) {
     try {
-      const np = await detectPersonaChange(incoming);
+      const np = await detectPersonaChange(incoming, cfg.persona || PERSONA_DEFAULT);
       if (np) {
-        config.set({ qq: { ...cfg, persona: np } });
-        say(`QQ 性格已按对方要求改为：${np}`);
-        dbg('[qq] 人设变更 ->', np);
+        config.set({ qq: { ...getCfg(), persona: np.reset ? null : np.persona } });
+        personaLog(qq, {
+          who: records.map((r) => r.who).join('/').slice(0, 40),
+          request: incoming.replace(/\n/g, ' / ').slice(0, 120),
+          persona: np.reset ? '（恢复默认）' : np.persona
+        });
+        saveState();
+        say(np.reset ? 'QQ 性格已恢复默认' : `QQ 性格已按对方要求更新：${np.persona}`);
+        dbg('[qq] 人设变更 ->', np.reset ? '(reset)' : np.persona);
       }
     } catch (err) {
       dbg('[qq] 人设识别失败：', err.message);
@@ -820,12 +942,21 @@ async function flushChat(qq) {
   }
 
   const ctx = (chatState(qq).ctx || []).slice(-CTX_PER_CHAT);
+  // 群聊用整段记忆当上下文（里面已经包含刚发的这几条），私聊用短 ctx
+  const history = isGroup ? memoryText(qq, cfg.memoryContext) : ctx;
   let reply = null;
   let memePath = null;
   try {
-    const [gen, meme, err] = await generateReply(ctx, incoming, imageUri, getCfg());
+    const [gen, meme, err] = await generateReply({
+      history,
+      incoming,
+      imageUri,
+      cfg: getCfg(),
+      isGroup,
+      addressed: items.some((i) => i.addressed)
+    });
     if (!gen && !meme) {
-      dbg('[qq]', name, '生成放弃：', err || '模型输出为空/标记跳过');
+      dbg('[qq]', name, '这次不接话：', err || '模型判断跟他没关系/输出为空');
       return;
     }
     reply = gen;
@@ -843,11 +974,13 @@ async function flushChat(qq) {
   // 发语音的条件：对方发了语音 / 明确要语音 / 配置 voiceAlways。失败退回文字
   const voiceReq = /发(条|个|个)?语音|语音回|用语音|语音说|语音呢|说句话听听/.test(incoming);
   const wantVoice = !!getCfg().voiceReply && !!(voiceUrl || getCfg().voiceAlways || voiceReq);
+  const sentIds = []; // 这次发出去的消息 id，别人引用回复时能认出「这是说我」
   let sentVoice = false;
-  if (wantVoice && reply) {
+  if (client && wantVoice && reply) {
     try {
       const file = await ttsToFile(reply, getCfg());
-      await client.sendRecord(isGroup, targetId, file);
+      const r = await client.sendRecord(isGroup, targetId, file);
+      if (r && r.message_id) sentIds.push(Number(r.message_id));
       sentVoice = true;
       dbg('[qq] 已发送语音 ->', name, reply);
     } catch (err) {
@@ -857,12 +990,13 @@ async function flushChat(qq) {
 
   // 配图：模型挑了表情包就发（文字和图拼一条消息；语音场景图单独发）
   let sentMeme = false;
-  if (memePath) {
+  if (client && memePath) {
     try {
       const segs = [];
       if (reply && !sentVoice) segs.push({ type: 'text', data: { text: reply } });
       segs.push({ type: 'image', data: { file: `file:///${memePath.replace(/\\/g, '/')}` } });
-      await client.sendSegments(isGroup, targetId, segs);
+      const r = await client.sendSegments(isGroup, targetId, segs);
+      if (r && r.message_id) sentIds.push(Number(r.message_id));
       sentMeme = true;
       dbg('[qq] 已发送配图 ->', name, path.basename(memePath));
     } catch (err) {
@@ -872,9 +1006,11 @@ async function flushChat(qq) {
 
   if (!sentVoice && !sentMeme) {
     try {
-      await (isGroup
+      if (!client) throw new Error('连接已关闭');
+      const r = await (isGroup
         ? client.sendGroupText(targetId, reply)
         : client.sendPrivateText(targetId, reply));
+      if (r && r.message_id) sentIds.push(Number(r.message_id));
     } catch (err) {
       dbg('[qq]', name, '发送失败：', err.message);
       say(`QQ 回复 ${name} 发送失败：${err.message}`);
@@ -884,6 +1020,9 @@ async function flushChat(qq) {
 
   guardRecord(getCfg(), qq, reply || '');
   const cs = chatState(qq);
+  // 自己说过的话也进记忆，模型才知道刚才跟谁在说什么、有没有接过话
+  if (isGroup) pushMemory(qq, '我', reply || '（表情包）', getCfg().memoryLimit);
+  cs.sentMsgIds = [...(cs.sentMsgIds || []), ...sentIds].slice(-10);
   cs.ctx = [...ctx, `对方：${incoming.replace(/\n/g, '；')}`, `我：${reply || '（发了个表情包）'}`].slice(-CTX_PER_CHAT);
   saveState();
 

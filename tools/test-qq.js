@@ -45,16 +45,23 @@ try {
 } catch (err) {
   check('qq/client.js 加载', false, err.message);
 }
+let llmStub;
 try {
-  // 先把 llm 换成桩：测试里不真调模型 API
+  // 先把 llm 换成桩：测试里不真调模型 API。behavior 可按入参返回不同内容
   const llmPath = require.resolve(path.join(ROOT, 'src/core/llm.js'));
+  llmStub = {
+    behavior: () => '“好嘞，我看看。”',
+    calls: []
+  };
+  llmStub.chat = async (opts) => {
+    llmStub.calls.push(opts);
+    return { content: llmStub.behavior(opts) };
+  };
   require.cache[llmPath] = {
     id: llmPath,
     filename: llmPath,
     loaded: true,
-    exports: {
-      chat: async () => ({ content: '“好嘞，我看看。”' })
-    }
+    exports: llmStub
   };
   bot = require(path.join(ROOT, 'src/core/qq/bot.js'));
   check('qq/bot.js 加载', true);
@@ -293,9 +300,8 @@ async function main() {
       check('表情包清单可读', _internals.memeListText().includes('meme-1.png'));
 
       // llm 桩临时改成只回配图标记（纯图无文字）
-      const llmPath = require.resolve(path.join(ROOT, 'src/core/llm.js'));
-      const origChat = require.cache[llmPath].exports.chat;
-      require.cache[llmPath].exports.chat = async () => ({ content: '[图:meme-1.png]' });
+      const origBehavior = llmStub.behavior;
+      llmStub.behavior = () => '[图:meme-1.png]';
       await pushEvent(petWs, {
         post_type: 'message', message_type: 'private', sub_type: 'friend',
         user_id: 10001, message_id: 400, message: [{ type: 'text', data: { text: '无语住了' } }]
@@ -311,7 +317,73 @@ async function main() {
         imgSent && imgSent.params.message.every((s) => s.type !== 'text' || (s.data.text || '').trim()),
         imgSent && JSON.stringify(imgSent.params.message)
       );
-      require.cache[llmPath].exports.chat = origChat; // 还原桩
+      llmStub.behavior = origBehavior; // 还原桩
+
+      /* ---------------- 群聊记忆 / 不插嘴 / 昵称标签 / 调教演进 ---------------- */
+
+      // 用例 K：群聊消息都进记忆（含机器人没回的），带说话人标签
+      const gState = _internals.chatState('888');
+      check('群消息写进记忆', Array.isArray(gState.memory) && gState.memory.length >= 1, JSON.stringify(gState.memory));
+      check(
+        '记忆带说话人标签',
+        gState.memory.some((m) => m.who === '小明'),
+        JSON.stringify(gState.memory.slice(-3))
+      );
+      check(
+        '自己说过的话也进记忆',
+        gState.memory.some((m) => m.who === '我'),
+        JSON.stringify(gState.memory.slice(-3))
+      );
+
+      // 用例 L：别人互聊，模型输出 [SKIP] → 不插嘴，但记忆照样记
+      llmStub.behavior = () => '[SKIP]';
+      const beforeSkip = groupCount;
+      const memLenBefore = _internals.chatState('888').memory.length;
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'group', sub_type: 'normal',
+        user_id: 10002, group_id: 888, message_id: 500,
+        sender: { card: '小红', nickname: '小红' },
+        message: [{ type: 'text', data: { text: '你昨天几点睡的' } }]
+      });
+      check('互聊时不插嘴', groupCount === beforeSkip, `实际 ${groupCount}`);
+      check(
+        '没回的消息也进记忆',
+        _internals.chatState('888').memory.length === memLenBefore + 1,
+        `实际 ${_internals.chatState('888').memory.length}`
+      );
+
+      // 用例 M：群聊上下文用「[昵称] 内容」区分说话人，且明确告知标签只用于区分
+      llmStub.behavior = () => '睡了睡了';
+      llmStub.calls.length = 0;
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'group', sub_type: 'normal',
+        user_id: 10003, group_id: 888, message_id: 501,
+        sender: { card: '阿强', nickname: '阿强' },
+        message: [{ type: 'text', data: { text: '那你们几点睡的' } }]
+      });
+      const genCall = llmStub.calls.find((c) => c.allowTools === false && c.temperature === 1.0);
+      const genUser = genCall && (typeof genCall.messages[1].content === 'string' ? genCall.messages[1].content : '');
+      const genSys = genCall && genCall.messages[0].content;
+      check('上下文里有说话人标签', !!genUser && genUser.includes('[小红]') && genUser.includes('[阿强]'), genUser);
+      check('提示词声明标签只用于区分', !!genSys && genSys.includes('只是说话人标签'), genSys && genSys.slice(0, 80));
+
+      // 用例 N：调教是演进式的（把当前人设交给模型合并）
+      llmStub.behavior = (opts) => {
+        const sys = String((opts.messages[0] && opts.messages[0].content) || '');
+        if (sys.includes('性格管理员')) {
+          return '{"change": true, "persona": "傲娇小丫头但说话温柔，偶尔才骂人，被夸会脸红"}';
+        }
+        return '行吧 我温柔点';
+      };
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'private', sub_type: 'friend',
+        user_id: 10001, message_id: 600, message: [{ type: 'text', data: { text: '以后跟我说话温柔点' } }]
+      });
+      const newCfg = _internals.getCfg();
+      check('调教后人设已更新', String(newCfg.persona || '').includes('温柔'), newCfg.persona);
+      check('调教有记录', _internals.loadState().personaLog.length > 0, JSON.stringify(_internals.loadState().personaLog[0]));
+      const personaLogText = JSON.stringify(_internals.loadState().personaLog[0] || {});
+      check('调教记录带请求原文', personaLogText.includes('温柔'), personaLogText);
 
       bot.shutdown();
       wss.close();
