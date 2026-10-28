@@ -21,7 +21,9 @@ const { OneBotClient } = require('./client');
  * 状态落盘 .data/qq-state.json，重启不丢「已处理到哪条」。
  */
 
-// 默认人设（群里人可以要求改，改了会持久化到配置 qq.persona）
+// 默认人设。注意：QQ 机器人的性格和桌宠本体性格（src/core/persona.js）是完全独立的两套配置，
+// 存在 qq.persona 里，群里人怎么调教就怎么变，调教结果持久化，不受桌宠性格影响。
+// 默认只给个底色，主要靠群友后续调教。
 const PERSONA_DEFAULT = '凶巴巴的傲娇小丫头：嘴硬心软、爱损人但没坏心、被夸就傲娇、被怼就炸毛、脏话张口就来（卧槽/妈的/个屁/sb 这个程度，别追着人辱骂）';
 
 // 去人机味思路（参考 github 上多个 QQ 机器人项目的实践）：
@@ -338,7 +340,7 @@ async function ttsToFile(text, cfg) {
   return file;
 }
 
-async function generateReply(historyTexts, incoming, speaker, imageUri, cfg) {
+async function generateReply(historyTexts, incoming, imageUri, cfg) {
   const llmCfg = config.getLLM();
   if (!llmCfg || !llmCfg.enabled || !llmCfg.apiKey) {
     return [null, '没有配置模型，无法自动生成回复'];
@@ -347,8 +349,8 @@ async function generateReply(historyTexts, incoming, speaker, imageUri, cfg) {
   if (historyTexts && historyTexts.length) {
     user.push('最近的聊天记录：\n' + historyTexts.join('\n'));
   }
-  if (speaker) user.push(`发言人：${speaker}`);
-  user.push(`${speaker ? '群里有人' : '对方'}刚发来的消息：${incoming}\n\n请直接给出要回复的那句话。`);
+  // 不给发言人名字/网名：模型不需要知道对方叫什么，避免拿名字称呼对方或被网名带偏语气
+  user.push(`对方刚发来的消息：${incoming}\n\n请直接给出要回复的那句话。`);
   const userText = user.join('\n\n');
 
   const msg = await llm.chat({
@@ -575,10 +577,7 @@ async function onMessage(event) {
     isGroup,
     targetId,
     qq,
-    name,
-    speaker: isGroup
-      ? String((event.sender && (event.sender.card || event.sender.nickname)) || '').slice(0, 30)
-      : ''
+    name
   };
 
   // 入队攒批：等 batchWaitMs，看对方还有没有下一条
@@ -592,7 +591,7 @@ async function onMessage(event) {
   pend.timer = setTimeout(() => {
     flushChat(qq).catch((err) => dbg('[qq] 聚合回复失败:', err.message));
   }, cfg.batchWaitMs || 4000);
-  dbg('[qq] 暂存消息（攒批中）:', name, item.speaker || '', String(item.text).slice(0, 30));
+  dbg('[qq] 暂存消息（攒批中）:', name, String(item.text).slice(0, 30));
 }
 
 async function flushChat(qq) {
@@ -632,7 +631,7 @@ async function flushChat(qq) {
       const marks = it.faceMarks.join('、');
       piece = piece ? `${piece}（${marks}的表情）` : `（发了个「${marks}」表情）`;
     }
-    if (it.isGroup && it.speaker) piece = `${it.speaker}：${piece || '（没打字，只发了图/表情）'}`;
+    // 不带发言人网名，直接给内容
     if (piece) parts.push(piece);
   }
   let incoming = parts.join('\n');
@@ -648,8 +647,9 @@ async function flushChat(qq) {
 
   say(`QQ 收到 ${name} 的消息${items.length > 1 ? `（攒了 ${items.length} 条）` : ''}：「${incoming.slice(0, 40).replace(/\n/g, ' / ')}${incoming.length > 40 ? '…' : ''}」，正在想怎么回`);
 
-  // 群友/私聊对象要求改性格：关键词粗筛 + LLM 精判，命中就持久化并当场生效
-  if (/性格|人设|语气|说话(方式|风格)|好好说话|换(个)?人设|别这样(说话|回)/.test(incoming)) {
+  // 群友/私聊对象要求改性格：关键词粗筛（放宽，宁可多问一次 LLM 也别漏掉调教）+ LLM 精判，
+  // 命中就持久化并当场生效。QQ 性格是独立配置（qq.persona），只被这里改。
+  if (/性格|人设|语气|口吻|说话|风格|方式|温柔|可爱|凶|高冷|傲娇|礼貌|正经|热情|像人|像真|机器人/.test(incoming)) {
     try {
       const np = await detectPersonaChange(incoming);
       if (np) {
@@ -675,7 +675,7 @@ async function flushChat(qq) {
   const ctx = (chatState(qq).ctx || []).slice(-CTX_PER_CHAT);
   let reply;
   try {
-    const [gen, err] = await generateReply(ctx, incoming, '', imageUri, getCfg());
+    const [gen, err] = await generateReply(ctx, incoming, imageUri, getCfg());
     if (!gen) {
       dbg('[qq]', name, '生成放弃：', err || '模型输出为空/标记跳过');
       return;
