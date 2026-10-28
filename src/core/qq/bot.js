@@ -115,7 +115,8 @@ function chatState(qq) {
 /** 连发计数超过这个时间没活动就视为新的一轮交互 */
 const CONSECUTIVE_RESET_MS = 5 * 60 * 1000;
 
-/** 发送前闸门。返回 (放行?, 原因)。默认不放行。 */
+/** 发送前闸门。返回 (放行?, 原因)。默认不放行。
+ *  参数为 0 或负数 = 解除该限制（用户要求可全关，只留最小间隔）。 */
 function guardCheck(cfg, qq) {
   const s = loadState();
   const now = Date.now();
@@ -128,15 +129,17 @@ function guardCheck(cfg, qq) {
   }
 
   const gap = now - (c.lastSentAt || 0);
-  if (gap < cfg.perChatIntervalSeconds * 1000) {
-    return [false, `间隔不足(${Math.round(gap / 1000)}s)`];
+  if (cfg.perChatIntervalSeconds > 0 && gap < cfg.perChatIntervalSeconds * 1000) {
+    return [false, `间隔不足(${Math.round(gap * 10) / 10}s)`];
   }
-  if ((c.consecutive || 0) >= cfg.maxConsecutive) {
+  if (cfg.maxConsecutive > 0 && (c.consecutive || 0) >= cfg.maxConsecutive) {
     return [false, `连发达上限(${c.consecutive})`];
   }
-  s.sentThisHour = (s.sentThisHour || []).filter((t) => now - t < 3600000);
-  if (s.sentThisHour.length >= cfg.maxPerHour) {
-    return [false, `每小时达上限(${s.sentThisHour.length})`];
+  if (cfg.maxPerHour > 0) {
+    s.sentThisHour = (s.sentThisHour || []).filter((t) => now - t < 3600000);
+    if (s.sentThisHour.length >= cfg.maxPerHour) {
+      return [false, `每小时达上限(${s.sentThisHour.length})`];
+    }
   }
   return [true, ''];
 }
@@ -153,6 +156,7 @@ function guardRecord(cfg, qq, text) {
 }
 
 function isDuplicate(cfg, qq, text) {
+  if (cfg.dedupeWindowSeconds <= 0) return false; // 0 = 关闭去重
   const c = chatState(qq);
   const cutoff = Date.now() - cfg.dedupeWindowSeconds * 1000;
   c.recentTexts = (c.recentTexts || []).filter((x) => x.at > cutoff);
