@@ -65,8 +65,6 @@ body {
   --text-faint: #8c8078;
   --line: rgba(0, 0, 0, 0.1);
   color: var(--text);
-  /* 白底压在深浅不一的壁纸上，一点白色描边把字从背景里拎出来 */
-  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.6);
 }
 
 /* 上方放不下、气泡翻到脑袋下方时：句号改挂顶边，圆点中心距窗口顶边 11px */
@@ -102,7 +100,7 @@ body[data-below="1"] .cloud-dot {
    注意 backdrop-filter 在 Electron 透明窗口上模糊不了窗口外的桌面，
    所以「半透」只能靠调不透明度，太低字就浮了，0.86 是可读与透的折中 */
 .cloud-path {
-  fill: rgba(255, 255, 255, 0.86);
+  fill: #ffffff;
   stroke: rgba(120, 96, 72, 0.22);
   stroke-width: 1.6;
   stroke-linejoin: round;
@@ -116,10 +114,22 @@ body[data-below="1"] .cloud-dot {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.86);
+  background: #ffffff;
   box-shadow: inset 0 0 0 1.4px rgba(120, 96, 72, 0.22);
   z-index: 1;
   pointer-events: none;
+}
+
+/* 句号朝向桌宠：气泡在宠物左边（side=left）→ 圆点在气泡右边缘；
+   气泡在宠物右边（side=right）→ 圆点在气泡左边缘。
+   配合主进程算好的 data-side 翻面，看起来像桌宠头顶冒出的想法泡泡 */
+body[data-side="right"] .cloud-dot {
+  left: 36px;
+  right: auto;
+}
+body[data-side="left"] .cloud-dot {
+  right: 36px;
+  left: auto;
 }
 
 /* 内容层压在云朵上。四边留 22px 是为了避开轮廓的凹口：
@@ -293,8 +303,8 @@ body[data-below="1"] .cloud-dot {
   width: 12px;
   height: 12px;
   bottom: 14px;
-  background: #1d1916;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #161210;
+  border: 1px solid rgba(255, 255, 255, 0.18);
   transform: rotate(45deg);
   z-index: 1;
   pointer-events: none;
@@ -320,7 +330,7 @@ body[data-below="1"] #view-settings .tail {
   width: 100%;
   height: 100%;
   border-radius: 18px;
-  background: rgba(22, 18, 16, 0.68);
+  background: #161210;
   border: 1px solid rgba(255, 255, 255, 0.18);
   box-shadow:
     0 24px 48px -12px rgba(0, 0, 0, 0.72),
@@ -330,9 +340,6 @@ body[data-below="1"] #view-settings .tail {
   overflow: visible;
   position: relative;
   z-index: 2;
-  text-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.92),
-    0 0 1px rgba(0, 0, 0, 0.7);
 }
 
 .shell input,
