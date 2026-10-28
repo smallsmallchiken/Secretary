@@ -60,6 +60,51 @@ function psQuote(s) {
   return "'" + String(s).replace(/'/g, "''") + "'";
 }
 
+/**
+ * 静默创建 NapCat（首选）。
+ *
+ * 要兼得三件事：① 不弹黑窗；② 跟桌宠脱钩（桌宠重启不被收走）；③ 退出 parenowershell 后继续活。
+ * WMI 创建虽然脱钩，但 NapCat 是控制台程序，会被显式分配一个可见控制台；
+ * 直接用 ProcessStartInfo + ShellExecute + WindowStyle=Hidden 三者同时满足：
+ * ShellExecute 方式创建的进程挂在 Shell 名下，powershell 一退它就独立了。
+ *
+ * 返回 pid 或 null。
+ */
+function startHidden() {
+  return new Promise((resolve) => {
+    const exe = napcatExe();
+    const uin = String(cfg().quickLoginUin || '').trim();
+    const cwd = path.dirname(exe);
+    const ps =
+      `$si = New-Object System.Diagnostics.ProcessStartInfo; ` +
+      `$si.FileName = ${psQuote(exe)}; ` +
+      `$si.Arguments = ${psQuote(uin)}; ` +
+      `$si.WorkingDirectory = ${psQuote(cwd)}; ` +
+      `$si.UseShellExecute = $true; ` +
+      `$si.WindowStyle = 'Hidden'; ` +
+      `$p = [System.Diagnostics.Process]::Start($si); ` +
+      `Write-Output $p.Id`;
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps],
+      { timeout: 20000, windowsHide: true },
+      (err, stdout) => {
+        if (err) {
+          dbg('[napcat] 静默启动失败：', err.message.split('\n')[0]);
+          return resolve(null);
+        }
+        const pid = parseInt(String(stdout).trim(), 10);
+        if (!Number.isFinite(pid)) {
+          dbg('[napcat] 静默启动返回异常：', String(stdout).trim().slice(0, 60));
+          return resolve(null);
+        }
+        dbg('[napcat] 静默创建成功（无控制台）pid =', pid);
+        resolve(pid);
+      }
+    );
+  });
+}
+
 /** WMI 创建 NapCat 进程（父级 WmiPrvSE，与桌宠脱钩）。返回 pid 或 null */
 function startViaWmi() {
   return new Promise((resolve) => {
@@ -110,23 +155,32 @@ async function ensureNapCat() {
   const uin = String(c.quickLoginUin || '').trim();
   dbg('[napcat] 端口 3001 不通，拉起 NapCat', uin ? `(快速登录 ${uin})` : '');
 
-  const pid = await startViaWmi();
-  if (pid) return { ok: true, reason: 'wmi' };
-
-  // 退路：普通 spawn（能用，但桌宠退出时会被一起带走）
-  try {
-    const child = spawn(exe, uin ? [uin] : [], {
-      cwd: path.dirname(exe),
-      detached: true,
-      stdio: 'ignore'
-    });
-    child.unref();
-    dbg('[napcat] 退路 spawn 成功 pid =', child.pid);
-    return { ok: true, reason: 'spawn' };
-  } catch (err) {
-    dbg('[napcat] spawn 失败：', err.message);
-    return { ok: false, reason: err.message };
+  // 优先静默启动（不弹黑窗）；WMI 次之（脱钩但会弹控制台）；最后退回普通 spawn
+  let pid = await startHidden();
+  let how = 'hidden';
+  if (!pid) {
+    pid = await startViaWmi();
+    how = 'wmi';
+    if (pid) dbg('[napcat] 静默启动不可用，回退到 WMI（会有一个控制台窗口）');
   }
+  if (!pid) {
+    // 退路：普通 spawn（能用，但桌宠退出时会被一起带走）
+    try {
+      const child = spawn(exe, uin ? [uin] : [], {
+        cwd: path.dirname(exe),
+        detached: true,
+        windowsHide: true,
+        stdio: 'ignore'
+      });
+      child.unref();
+      dbg('[napcat] 退路 spawn 成功 pid =', child.pid);
+      return { ok: true, reason: 'spawn' };
+    } catch (err) {
+      dbg('[napcat] spawn 失败：', err.message);
+      return { ok: false, reason: err.message };
+    }
+  }
+  return { ok: true, reason: how };
 }
 
 /** 桌宠启动时调用一次，并挂周期兜底（NapCat 掉线且 3001 不通时自动重拉） */
