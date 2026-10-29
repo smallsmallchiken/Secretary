@@ -24,6 +24,7 @@ const path = require('path');
 const { spawn, execFile } = require('child_process');
 const config = require('../core/config');
 const debug = require('../core/debug');
+const { startHidden, psQuote } = require('./hidden-launch');
 
 const dbg = debug.dbg;
 const PORT = 3001;
@@ -36,10 +37,32 @@ function cfg() {
   return config.get('qq', {}) || {};
 }
 
+/**
+ * 应用根目录。
+ *
+ * **不能用 process.cwd()**：手动 `npm start` 时 cwd 是项目目录，但**开机自启**
+ * （注册表 Run 项 / 快捷方式）启动时 cwd 是 C:\Windows\system32，
+ * 拼出来的 NapCat 路径直接不存在 —— 实测踩过：开机后日志报
+ * "[napcat] 找不到 C:\Windows\system32\qq-bot\... -> 不拉起"。
+ * app.getAppPath() 打包前后都稳定；拿不到时退回 __dirname 上两级。
+ */
+function appRoot() {
+  try {
+    const { app } = require('electron');
+    if (app && typeof app.getAppPath === 'function') {
+      const p = app.getAppPath();
+      if (p) return p;
+    }
+  } catch {
+    /* 非 Electron 环境（单测）走兜底 */
+  }
+  return path.resolve(__dirname, '..', '..');
+}
+
 function napcatExe() {
   const c = cfg();
   if (c.napcatExe && fs.existsSync(c.napcatExe)) return c.napcatExe;
-  return path.join(process.cwd(), 'qq-bot', 'napcat', 'NapCat.52230.Shell', 'NapCatWinBootMain.exe');
+  return path.join(appRoot(), 'qq-bot', 'napcat', 'NapCat.52230.Shell', 'NapCatWinBootMain.exe');
 }
 
 /** 探测 OneBot WS 端口通不通。NapCat 登录成功后才会监听，通了 = 可用 */
@@ -56,56 +79,7 @@ function probePort(timeoutMs = 800) {
   });
 }
 
-function psQuote(s) {
-  return "'" + String(s).replace(/'/g, "''") + "'";
-}
-
-/**
- * 静默创建 NapCat（首选）。
- *
- * 要兼得三件事：① 不弹黑窗；② 跟桌宠脱钩（桌宠重启不被收走）；③ 退出 parenowershell 后继续活。
- * WMI 创建虽然脱钩，但 NapCat 是控制台程序，会被显式分配一个可见控制台；
- * 直接用 ProcessStartInfo + ShellExecute + WindowStyle=Hidden 三者同时满足：
- * ShellExecute 方式创建的进程挂在 Shell 名下，powershell 一退它就独立了。
- *
- * 返回 pid 或 null。
- */
-function startHidden() {
-  return new Promise((resolve) => {
-    const exe = napcatExe();
-    const uin = String(cfg().quickLoginUin || '').trim();
-    const cwd = path.dirname(exe);
-    const ps =
-      `$si = New-Object System.Diagnostics.ProcessStartInfo; ` +
-      `$si.FileName = ${psQuote(exe)}; ` +
-      `$si.Arguments = ${psQuote(uin)}; ` +
-      `$si.WorkingDirectory = ${psQuote(cwd)}; ` +
-      `$si.UseShellExecute = $true; ` +
-      `$si.WindowStyle = 'Hidden'; ` +
-      `$p = [System.Diagnostics.Process]::Start($si); ` +
-      `Write-Output $p.Id`;
-    execFile(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps],
-      { timeout: 20000, windowsHide: true },
-      (err, stdout) => {
-        if (err) {
-          dbg('[napcat] 静默启动失败：', err.message.split('\n')[0]);
-          return resolve(null);
-        }
-        const pid = parseInt(String(stdout).trim(), 10);
-        if (!Number.isFinite(pid)) {
-          dbg('[napcat] 静默启动返回异常：', String(stdout).trim().slice(0, 60));
-          return resolve(null);
-        }
-        dbg('[napcat] 静默创建成功（无控制台）pid =', pid);
-        resolve(pid);
-      }
-    );
-  });
-}
-
-/** WMI 创建 NapCat 进程（父级 WmiPrvSE，与桌宠脱钩）。返回 pid 或 null */
+/** WMI 创建 NapCat 进程（父级 WmiPrvSE，与桌宠脱钩）。返回 pid 或 null。仅作静默启动失败时的回退 */
 function startViaWmi() {
   return new Promise((resolve) => {
     const exe = napcatExe();
@@ -156,7 +130,7 @@ async function ensureNapCat() {
   dbg('[napcat] 端口 3001 不通，拉起 NapCat', uin ? `(快速登录 ${uin})` : '');
 
   // 优先静默启动（不弹黑窗）；WMI 次之（脱钩但会弹控制台）；最后退回普通 spawn
-  let pid = await startHidden();
+  let pid = await startHidden(exe, uin ? [uin] : [], path.dirname(exe), 'napcat');
   let how = 'hidden';
   if (!pid) {
     pid = await startViaWmi();
