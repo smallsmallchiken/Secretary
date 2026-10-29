@@ -1,0 +1,22 @@
+{
+  "_说明": "复制成 config.json 再填。config.json 含密钥，绝对不要提交到仓库。",
+
+  "corpid": "ww你的企业ID",
+  "agentid": "1000002",
+  "corpsecret": "自建应用的Secret",
+
+  "token": "自己随便设一个，填进后台的回调配置里",
+  "encodingAESKey": "后台点「随机获取」得到的43位字符串",
+
+  "port": 8765,
+  "path": "/callback",
+
+  "_systemPrompt说明": "留空用内置的「公司助手」人设；要改成别的语气在这里写",
+  "systemPrompt": "",
+
+  "perUserIntervalSeconds": 5,
+  "maxPerHour": 60,
+
+  "_dryRun说明": "true 时只生成回复并记日志，不真的发出去。先跑通再改 false",
+  "dryRun": true
+}

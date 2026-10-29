@@ -1,0 +1,11 @@
+# wecom-bot 的依赖 —— 只有一个
+#
+# 一个 Python 文件都不用改，装完就能跑：
+#   python -m pip install -r requirements.txt
+#
+# 其余全是标准库（http.server / urllib / hmac / hashlib / xml.etree / ctypes）。
+# 可以复用 wechat-bot/py312 那个解释器：
+#   ../wechat-bot/py312/python.exe start.py
+
+# 企业微信回调消息的 AES-256-CBC 加解密
+cryptography>=42
