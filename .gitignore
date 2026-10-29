@@ -49,3 +49,6 @@ wechat-bot/bot-db-config.json
 # 企业微信机器人：含 CorpID / Secret
 wecom-bot/config.json
 wecom-bot/*.log
+
+# 主动发消息的配额状态（运行态）
+wechat-bot/proactive-state.json

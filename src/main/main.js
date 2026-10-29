@@ -287,11 +287,14 @@ function buildMenuItems() {
       ? '已启用(未连上)'
       : '关';
 
-  // 微信这边是全回模式（replyToAll），没有固定名单可数，写「全部私聊」比空着清楚
+  // 微信这边是全回模式（replyToAll），没有固定名单可数，写「全部私聊」比空着清楚；
+  // smart 群里只在被 @/点名/接话时开口，所以单独标出来，别让人以为群聊不回了。
   const wxScope = wxSt.replyToAll
     ? wxSt.groupMode === 'all'
       ? '私聊+群'
-      : '全部私聊'
+      : wxSt.groupMode === 'smart'
+        ? '私聊+群(被叫才回)'
+        : '全部私聊'
     : `${wxSt.whitelistCount}个会话`;
   const wxHint = !wxSt.available ? '未配置' : wxSt.running ? `值守中(${wxScope})` : '关';
 
