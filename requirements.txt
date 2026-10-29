@@ -1,2 +1,10 @@
+# 旧 Python 版桌宠（app/pet.py）的依赖
+#
+# 注意：这份只服务**已停用的旧版**（`run.bat` 启动的那套，只能聊天不能操作电脑）。
+# 主线是 Electron 版（`npm start` / `start.bat`），不需要 Python 环境。
+#
+# 微信自动回复的依赖在 wechat-bot/requirements.txt
+# 企业微信机器人的依赖在 wecom-bot/requirements.txt
+
 PySide6-Essentials==6.12.0
 requests>=2.32.0

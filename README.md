@@ -1,7 +1,7 @@
 # 万能桌宠 · 比格多栋
 
 一只住在 Windows 桌面右下角的比格犬，除了陪你坐着，还能真的替你干活：
-开应用、控音乐、设提醒、写微信回复、截图、查东西。
+开应用、控音乐、设提醒、截图、查东西，**还能替你回微信和 QQ**。
 
 分两层：**动画层**（雪碧图状态机）+ **能力层**（可被模型调用的工具）。
 配了模型之后，你用大白话提要求，它自己决定调哪个工具、按什么顺序调。
@@ -15,7 +15,12 @@ cd G:/资料/Github-Plugin/Secretary
 npm start
 ```
 
+或者直接双击根目录的 **`start.bat`**（它会先清掉 `ELECTRON_RUN_AS_NODE` 再启动）。
+
 依赖（Electron 33）已经装好。换机器先 `npm install`。
+
+> `ELECTRON_RUN_AS_NODE` 是本机全局环境变量，不清掉的话 Electron 会退化成纯 Node，
+> `require('electron')` 只拿到程序路径、`app` 是 undefined。这是最容易踩的坑。
 
 ---
 
@@ -110,18 +115,63 @@ npm start
 
 ---
 
-## 微信回复：为什么是半自动
+## 自动回复微信 / QQ
 
-个人微信没有开放 API。任何 hook、协议库、UI 自动化自动收发消息都**违反微信用户协议**，
-封的是你的主号，不值得。
+这是这个项目里最重的一块，独立成了两个子系统，和桌宠本体通过 IPC 通信。
 
-所以这里的做法是：
+### QQ：走官方协议端（稳）
 
-1. 你对桌宠说「回复老王说明天开会改到三点」
-2. 它把话写好并复制到剪贴板（配了模型还会把话说得体面些）
-3. 你切到微信，Ctrl+V，回车
+```
+QQ 客户端 ── NapCat ── OneBot 11 正向 WS :3001 ── 桌宠 src/core/qq/
+```
 
-零风险，代价只是多按一次粘贴。
+NapCat 是一个独立进程，加载官方 QQ 内核并暴露标准 OneBot 接口，所以**收发都是结构化数据**，
+不用截图不用 OCR。桌宠负责判断该不该回、怎么回。
+
+- 开机自启时桌宠会先探 3001 端口，不通就静默拉起 NapCat（无控制台窗口）并尝试快速登录
+- 只回**白名单内好友的私聊**；群聊、临时会话、图片一律不回
+- 护栏：同一会话 20 秒间隔、连发 3 条停 5 分钟、每小时 20 条、60 秒去重、按 `message_id` 指纹防重复
+- 状态落盘 `.data/qq-state.json`
+
+**风险**：NapCat 是非官方协议端，有封号风险，**务必挂小号**。
+NapCat 本体（1GB+）不入库，首次要自己下载到 `qq-bot/napcat/`。
+
+### 微信：只能走 UI 自动化（脏但能用）
+
+个人微信没有开放 API，微信 4.x 又打断了所有 hook 方案（WeChatFerry 只支持 3.9.12，
+wxauto 已停更），所以只剩下 UI 自动化这条路。
+
+```
+微信数据库（只读）── 读消息
+        UIA + OCR ── 发送
+```
+
+具体在 `wechat-bot/`，是个独立的 Python 进程，桌宠只负责拉起和开关：
+
+| 能力 | 怎么做的 |
+|---|---|
+| 读消息 | **直接读本地加密数据库**（只读，检测风险最低），不是截图认字 |
+| 发文字 | UIA 控件树 + 剪贴板粘贴 + 回车 |
+| 发图片 | 剪贴板 + Ctrl+V |
+| 发内置表情 | `Alt+E` 开面板 → 像素网格定位 → 点选 → 回车（面板是 Qt 自绘的，UIA 读不到） |
+| 发语音条 | TTS → VB-Audio 虚拟声卡 → 临时切换默认录音设备 → 按住右 Alt 说话 |
+
+拟人化做了这几件事（都在 `bot_db.py`）：回复前随机等 2–8 秒、长回复切成 2–3 条分开发、
+群聊先用确定性规则判「是不是冲我来的」再交给模型、没接的话先攒着当上下文、
+去掉 Markdown 和书面语、主动发消息有每日上限和时间窗。
+
+**风险**：UI 自动化违反微信用户协议，封的是主号。同样建议小号。
+详细配置见 `wechat-bot/README.md`。
+
+### 企业微信：官方 API（零风险，但只能对同事用）
+
+`wecom-bot/` 是另一套完全合规的实现：接收官方回调 + 主动发消息，没有任何封号风险。
+代价是只能给**同企业通讯录**里的人用。三条路线怎么选，见 `wecom-bot/README.md` 开头的对照表。
+
+### 半自动：生成草稿
+
+如果你连 UI 自动化都不想用，还有一档最保守的：对桌宠说「回复老王说明天开会改到三点」，
+它把话写好复制到剪贴板，你自己切到微信 `Ctrl+V` 回车。零风险，代价是多按一次粘贴。
 
 ---
 
@@ -131,14 +181,15 @@ npm start
 |---|---|
 | 左键点宠物 | 弹出 / 收起对话面板 |
 | 拖动宠物 | 挪位置 |
-| 右键宠物 | 菜单：快捷指令、走两步、回到右下角、设置 |
-| `Ctrl + Shift + Space` | 全局唤起对话面板 |
-| `Ctrl + Shift + P` | 全局直接打开网易云 |
+| 右键宠物 | 自绘透明菜单：自己漫步 / 溜达一圈 / QQ 自动回复 / 微信自动回复 / 设置 / 退出 |
+| `Alt + W` | 显隐对话面板（`Ctrl + Shift + Space` 也能用） |
+| `Alt + Q` | 显隐桌宠本体（不退出进程） |
+| `Alt + ↑` / `Alt + ↓` | 放大 / 缩小（0.45–2.0 倍） |
 | `Esc` | 收起面板 |
 | 托盘图标单击 | 唤起对话 |
 
-不管它的时候，它会在 idle / 坐 / 趴 / 溜达之间自己切换，偶尔真的在桌面上走两步。
-干活时变成摸下巴的思考状态，干完开心一下。
+不管它的时候，它会在 idle / 坐 / 趴 / 溜达之间自己切换，25–55 秒随机会真的在桌面上走两步
+（撞到屏幕边缘会掉头）。干活时变成摸下巴的思考状态，干完开心一下。
 
 ---
 
@@ -147,31 +198,72 @@ npm start
 ```
 src/
 ├── main/                    # 主进程
-│   ├── main.js              # 生命周期、IPC、消息调度
-│   ├── windows.js           # 宠物窗口 + 气泡窗口，定位与失焦保护
+│   ├── main.js              # 生命周期、IPC、消息调度、右键菜单条目
+│   ├── windows.js           # 宠物窗口 + 气泡窗口 + 自绘菜单窗口，定位与失焦保护
 │   ├── wander.js            # 自主漫游（主进程挪窗口 + 渲染器播行走帧）
 │   ├── tray.js              # 系统托盘
-│   └── shortcuts.js         # 全局快捷键
+│   ├── shortcuts.js         # 全局快捷键（默认 Alt+W / Alt+Q / Alt+↑↓）
+│   ├── napcat.js            # 探测并静默拉起 QQ 协议端
+│   ├── wechat-app.js        # 拉起微信客户端 + 托盘态唤窗
+│   └── hidden-launch.js     # 静默启动封装（无控制台窗口）
 ├── preload/                 # contextBridge 安全桥，渲染进程不碰 Node
+│   ├── pet-preload.js
+│   ├── bubble-preload.js
+│   └── menu-preload.js
 ├── renderer/
 │   ├── pet/                 # canvas 逐帧动画引擎 + 状态机
-│   └── bubble/              # 对话面板 + 设置面板
+│   ├── bubble/              # 对话面板 + 设置面板
+│   └── menu/                # 自绘透明右键菜单（原生 Menu 无法透明）
 └── core/
     ├── agent.js             # 意图路由：本地规则 / 中文时间解析 / LLM 编排
     ├── llm.js               # OpenAI 兼容客户端（function calling）
     ├── config.js            # 配置持久化
+    ├── persona.js           # 性格提示词拼装（预设 + 格式硬约束）
     ├── debug.js             # 调试日志（Windows 上 console 不连控制台，落盘）
+    ├── paths.js             # 路径解析（开机自启时 cwd 是 system32，不能靠 cwd）
+    ├── qq/                  # OneBot 11 客户端 + 回复决策
+    ├── wechat/              # 微信 Python 进程的托管（拉起 / 查状态 / 开关）
     └── tools/               # 能力层，一份定义同时供规则引擎和模型使用
         ├── apps.js          # 找应用：注册表 → 常见路径 → 开始菜单 → 协议 → 网页
         ├── media.js         # 媒体/音量（Win32 虚拟键）
         ├── system.js        # 时间、截图、锁屏、搜索、剪贴板
+        ├── ps.js            # PowerShell 辅助
         ├── reminder.js      # 提醒调度 + 持久化
         ├── wechat.js        # 微信草稿（只写剪贴板，不发送）
         └── index.js         # 工具注册表
 ```
 
+微信 / QQ / 企业微信三块各自独立成目录：`wechat-bot/`（Python）、`qq-bot/`（NapCat）、
+`wecom-bot/`（Python），都不依赖 Electron 就能单独跑。
+
 动画素材：`pets/duodong/spritesheet.webp`，8 列 × 9 行，单帧 192×208。
-每行帧数不同（0:6 / 1:8 / 3:4 / 4:5 / 5:8 / 6:6 / 7:6 / 8:6），第 2 行是第 1 行的重复。
+每行帧数不同（0:6 / 1:8 / 3:4 / 4:5 / 5:8 / 6:6 / 7:6 / 8:6）。
+**第 2 行是第 1 行的水平镜像**（左向行走），不是重复帧——少了它往左走时会变成倒着退。
+
+---
+
+## 测试
+
+四套测试，**都不需要开微信也能跑**（会碰真实微信的调用全部打了桩）：
+
+```bash
+# 桌宠主进程：模块加载 + 对话链路（不需要 GUI）
+node tools/test-agent.js
+# 漫游位移逻辑
+node tools/test-wander.js
+
+# 微信决策链：群聊门禁 / 分段 / 缓冲 / 概率闸 / 媒体标记
+wechat-bot/py312/python.exe wechat-bot/test_db_flow.py
+# 护栏：频率限制 / 去重 / 白名单
+wechat-bot/py312/python.exe wechat-bot/test_guard.py
+
+# 企业微信：加解密 / XML / HTTP 端到端（离线）
+wechat-bot/py312/python.exe wecom-bot/test_crypto.py
+wechat-bot/py312/python.exe wecom-bot/test_message.py
+```
+
+微信侧有一个必须遵守的约定：**任何 `live=True` 的发送都必须打桩**
+（`b.generate = _gen`），否则会真的往真实会话里发消息。之前踩过一次，往「wangzr」发出了「还行吧」。
 
 ---
 
@@ -180,9 +272,11 @@ src/
 - 开发运行：`项目/.data/config.json`
 - 打包后：`%APPDATA%/万能桌宠/config.json`
 - 提醒队列：`.data/reminders.json`（重启不丢）
-- 调试日志：`.data/debug.log`
+- 调试日志：`.data/debug.log`（主进程 console 不连终端，只能看这个文件）
+- QQ 状态：`.data/qq-state.json`
 
-`.data/` 里有 API Key，**不要提交到 git**。
+`.data/` 里有 API Key，**不要提交到 git**。同理还有 `config.json`（旧 Python 版）、
+`wechat-bot/bot-db-config.json`、`wecom-bot/config.json`。
 
 ---
 
@@ -226,6 +320,17 @@ src/
 开发模式下注册的命令会带上项目路径和那排 `--disable-gpu` 参数——
 少了它们，开机启动时会因为 GPU 进程崩溃而失败。打包成 exe 后只需注册 exe 本身。
 
+**开机后会连带拉起的东西**（都是静默的，不弹控制台）：
+
+1. NapCat（QQ 协议端）+ 快速登录
+2. 微信客户端——微信 4.x 常驻托盘且没有主窗口时，UI 自动化抓不到，所以还要再执行一次
+   exe 触发单实例唤窗
+3. 微信自动回复的 Python 值守进程
+
+这三个都有开关（`.data/config.json` 的 `qq.napcatAutostart`、`wechat.autostart`、
+`wechat.autoreply`）。**一个坑**：开机自启时 `process.cwd()` 是 `C:\Windows\system32`，
+所有路径都必须用 `app.getAppPath()` 算，不能用相对路径。
+
 **托盘图标在哪：** 应用窗口设了 `skipTaskbar`，不会占用任务栏。
 图标由系统托盘承载，Windows 11 默认把新图标收进 `^` 折叠区。
 想让它常驻任务栏，点 `^` 展开后把它拖到外面即可（系统记住这个设置）。
@@ -233,13 +338,21 @@ src/
 
 ---
 
-## 与旧 Python 版的关系
+## 目录里几个 .bat 的区别
 
-目录里的 `app/`、`run.bat`、`config.json` 是早先的 Python 实现（`app/pet.py` + `ai.py`），
-它只能聊天，不能操作电脑。这版 Electron 重写了它，并补上了工具层。
+容易搞混，列一下：
+
+| 文件 | 作用 |
+|---|---|
+| `start.bat` | **启动桌宠（Electron 版）**，日常用这个 |
+| `run.bat` | 启动旧 Python 版桌宠（`app/pet.py`），只能聊天 |
+| `setup.bat` | 给旧 Python 版建 `.venv` 环境，只跑一次 |
+
+`app/`、`run.bat`、`setup.bat`、`config.json` 是早先的 Python 实现，它只能聊天、
+不能操作电脑，也没有微信/QQ 那套。Electron 版重写了它并补上了工具层，
+**新版本是功能超集**，旧版仅作备选保留。
 
 两者互不干扰（配置文件名不同：`config.json` vs `.data/config.json`）。
-喜欢哪套用哪套；新版本功能是超集。
 
 ---
 

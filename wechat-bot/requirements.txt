@@ -1,0 +1,32 @@
+# wechat-bot 的 Python 依赖
+#
+# 目标解释器：Python 3.12（本项目用 py312/ 里的嵌入式运行时）。
+# 装法（在 wechat-bot/ 目录下）：
+#   py312/python.exe -m pip install -r requirements.txt -i https://pypi.org/simple
+#
+# 注：清华镜像没有部分新包（历史上缺 PySide6），装不上就先换官方源。
+
+# 微信 4.x 自动化核心：SQLCipher 数据库解密读取 + UIA / 坐标-OCR 混合发送
+# 来源 https://github.com/fanyuantaier/wechatauto-replica
+# 它自己会拉 uiautomation / pywin32 / opencv / zstandard / winsdk 等
+wechatauto-replica==1.2.8.1
+
+# 发语音条：把系统默认录音设备临时切到虚拟声卡（VB-Audio Cable）
+pycaw==20260927
+# 音频播放与录音（播放 TTS 到 CABLE Input）
+sounddevice==0.5.6
+
+# 其余为 wechatauto-replica 的传递依赖，钉住版本以免升级后行为漂移
+uiautomation==2.0.29
+comtypes==1.4.17
+pywin32==312
+pillow==13.0.0
+numpy==2.5.4
+opencv-python==5.0.0.93
+cryptography==50.0.2
+zstandard==0.25.0
+winsdk==1.0.0b10
+imageio-ffmpeg==0.7.0
+psutil==7.2.2
+pyperclip==1.11.0
+colorama==0.4.6
