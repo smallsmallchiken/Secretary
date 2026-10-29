@@ -19,6 +19,7 @@
 import argparse
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -119,6 +120,8 @@ DEFAULTS = {
     "maxPerHour": 300,
     "dedupeWindowSeconds": 30,
     "sendVerify": False,
+    # 回复前随机等几秒。秒回是最大的 AI 破绽，也容易在对方连发时刷屏。
+    "replyDelaySeconds": [2, 8],
 }
 
 
@@ -405,6 +408,17 @@ class DbBot:
             log(f"  {name!r} 被护栏拦下：{why}")
             guard.log_event(event="guard-block", chat=chat, reason=why)
             return False
+
+        # 秒回是最大的 AI 破绽：真人不会条条都在 0.5 秒内回。这里随机等一会儿，
+        # 顺带把「对方连发三条」的空档等过去，最后只回一句（更像人，也少刷屏）。
+        # 放在护栏之后：已经被拦下/已回过的消息不该再白等。
+        if live:
+            try:
+                lo, hi = self.cfg.get("replyDelaySeconds") or (0, 0)
+                if float(hi) > 0:
+                    time.sleep(random.uniform(float(lo), float(hi)))
+            except Exception:
+                pass
 
         reply, err = self.generate(chat, name, incoming, history, is_group, addressed)
         if reply == SKIP_TOKEN:
