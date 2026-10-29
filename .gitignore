@@ -45,6 +45,10 @@ wechat-bot/*-src.png
 # 探测过程的临时截图（表情面板标定等）
 wechat-bot/_probe/
 wechatauto_logs/
+# uiautomation 库自己往工作目录写的自动化日志、临时备份、运行时压缩包
+wechat-bot/@AutomationLog.txt
+wechat-bot/*.bak
+wechat-bot/*.zip
 # 含登录账号 / 本地绝对路径的配置，不入库
 wechat-bot/bot-config.json
 wechat-bot/bot-db-config.json

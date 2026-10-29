@@ -58,7 +58,10 @@ const DEFAULT_CONFIG = {
   },
   // 常用应用别名，用户可自行补充
   appAliases: {},
-  // QQ 自动回复（连 NapCat 协议端）。白名单为空时即使开关打开也不会回复任何人
+  // QQ 自动回复（连 NapCat 协议端）。白名单为空时即使开关打开也不会回复任何人。
+  // 这里只列跨模块共用的基础项；完整的运行时默认值（batchWaitMs / memoryLimit /
+  // ttsModel / persona 等）在 src/core/qq/bot.js 的 defaultConfig() 里，
+  // getCfg() 会用它兜底，所以这里缺字段不会导致 undefined。
   qq: {
     enabled: false,
     wsUrl: 'ws://127.0.0.1:3001',
@@ -67,7 +70,18 @@ const DEFAULT_CONFIG = {
     perChatIntervalSeconds: 20,
     maxConsecutive: 3,
     maxPerHour: 20,
-    dedupeWindowSeconds: 60
+    dedupeWindowSeconds: 60,
+    // 开机时静默拉起 NapCat 并尝试快速登录（false = 自己手动开）
+    napcatAutostart: true,
+    quickLoginUin: '',
+    // NapCat 可执行文件路径，留空 = qq-bot/napcat/NapCat.52230.Shell/
+    napcatExe: ''
+  },
+  // 微信自动回复。真正的开关和参数在 wechat-bot/bot-db-config.json 里，
+  // 这边只管「要不要把微信客户端和值守进程拉起来」。
+  wechat: {
+    // 开机时确保微信客户端在跑（托盘态会再唤一次窗口，否则 UI 自动化抓不到）
+    autostart: true
   }
 };
 
