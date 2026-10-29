@@ -42,7 +42,7 @@ DEFAULTS = {
     "startupDelayMinutes": 30,  # 刚启动别急着找人，先等一会儿
 }
 
-PROACTIVE_PROMPT = """现在是 {clock}。你要主动给对方发一条微信——不是回复他，是你自己想起他了，想找他说句话。
+PROACTIVE_PROMPT = """现在是 {clock}。你要主动给对方发一条微信——不是回复他，是你自己想起他了，想找他说句话。{mood}
 
 要求（这几条比人设优先）：
 - 接着上次聊过的具体事说，或者分享一句自己刚遇到的破事/见闻，或者问一件具体的事
@@ -59,6 +59,12 @@ PROACTIVE_PROMPT = """现在是 {clock}。你要主动给对方发一条微信�
 不合格（太像客服/推动销）：
 「嗨，最近过得怎么样呀？有什么新鲜事想跟我分享吗？」
 「在吗？想找你聊聊天～」"""
+
+# 上次主动找过、对方没接——这次就该收敛了。连着热脸贴冷屁股最像推销。
+MOOD_UNANSWERED = """
+
+注意：你上次主动找过 TA，TA 没理你。这条别再热络，也别补一句「在吗」，
+就像随口嘟囔一句，发完这事就过去了，别追。"""
 
 
 def _now_clock():
@@ -265,7 +271,8 @@ class Proactive:
         import bot_db
         system = bot_db.build_system_prompt(self.bot.cfg, is_group=False)
         history = self._history(c)
-        prompt = PROACTIVE_PROMPT.format(clock=_now_clock())
+        mood = MOOD_UNANSWERED if int(self.state.get("unanswered") or 0) > 0 else ""
+        prompt = PROACTIVE_PROMPT.format(clock=_now_clock(), mood=mood)
         if history:
             prompt += f"\n\n跟「{c['name']}」最近的聊天记录（旧 -> 新）：\n{history}"
         text, err = llm.generate(prompt, system=system, cfg=None, temperature=1.0)
@@ -288,14 +295,20 @@ class Proactive:
         if not live:
             print(f"  [dry-run] 主动发给 {c['name']!r}：{text!r}", flush=True)
             return False
-        try:
-            r = self.bot.gui.send_msg(text, who=c["name"],
-                                      verify=self.bot.cfg.get("sendVerify", False))
-        except Exception as exc:
-            guard.log_event(event="proactive-send-error", chat=c["name"],
-                            err=f"{type(exc).__name__}: {exc}")
-            return False
-        print(f"  [主动] -> {c['name']!r}：{text!r}  ({r})", flush=True)
+        import bot_db
+        cfg = self.bot.cfg
+        parts = bot_db.split_reply(text, cfg)
+        for i, part in enumerate(parts):
+            if i:
+                time.sleep(bot_db.typing_delay(part, cfg))
+            try:
+                r = self.bot.gui.send_msg(part, who=c["name"],
+                                          verify=cfg.get("sendVerify", False))
+            except Exception as exc:
+                guard.log_event(event="proactive-send-error", chat=c["name"],
+                                err=f"{type(exc).__name__}: {exc}")
+                return False
+            print(f"  [主动] -> {c['name']!r}：{part!r}  ({r})", flush=True)
         guard.log_event(event="proactive-sent", chat=c["name"], reply=text)
         self.state["lastAt"] = time.time()
         self.state["count"] = self._count_today() + 1

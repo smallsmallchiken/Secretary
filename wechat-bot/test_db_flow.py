@@ -248,6 +248,121 @@ def main():
     check("确实调了生成", called["n"], 1)
 
     print()
+    print("== 分段发送：长拆短、短不拆 ==")
+    scfg = {"segmentReply": True, "segmentMinChars": 26, "segmentMaxParts": 3,
+            "typingCps": 7, "typingMaxSeconds": 5}
+    check("两三个字不拆", bot_db.split_reply("行", scfg), ["行"])
+    check("不到阈值不拆", bot_db.split_reply("嗯我知道了我马上就去弄", scfg),
+          ["嗯我知道了我马上就去弄"])
+    check("空串不产生消息", bot_db.split_reply("   ", scfg), [])
+    long1 = "我今天下午去了一趟医院。医生说要观察两天。你别担心。"
+    got = bot_db.split_reply(long1, scfg)
+    check("三条长句拆成三条", len(got), 3)
+    check("拆开不丢字", "".join(got), long1)
+    check("关掉开关就不拆", bot_db.split_reply(long1, {"segmentReply": False}),
+          [long1])
+    two_lines = "第一条内容写得够长了吧哈哈哈\n第二条也写得够长了吧哈哈哈"
+    check("有换行就按换行拆", len(bot_db.split_reply(two_lines, scfg)), 2)
+    four = ("一句够长的话在这里。二句够长的话在这里。"
+            "三句够长的话在这里。四句够长的话在这里。")
+    check("超过段数上限就合并尾部", len(bot_db.split_reply(four, scfg)), 3)
+    d = bot_db.typing_delay("这是十个字的一句话呀", scfg)
+    check("打字停顿落在合理区间", 0.2 <= d <= 5.0, True)
+
+    print()
+    print("== 群聊上下文缓冲：没接的话攒着，下次开口带上 ==")
+    b = make_bot(base_cfg(), group_msgs())
+    b._ctx_buf = {}
+    b._buffer("测试群", "A", "周末去爬山")
+    b._buffer("测试群", "A", "周末去爬山")   # 同一条不该攒两遍
+    b._buffer("测试群", "B", "我不去")
+    check("缓冲去重", len(b._ctx_buf["测试群"]), 2)
+    ctx = b._take_context("测试群")
+    check("取出时带上说话人", "[B] 我不去" in ctx, True)
+    check("取出即清空", b._ctx_buf.get("测试群"), None)
+    b._ctx_buf = {}
+    for i in range(20):
+        b._buffer("测试群", "A", f"话{i}")
+    check("缓冲有上限（默认 12）", len(b._ctx_buf["测试群"]), 12)
+    check("超出时丢最旧的", b._ctx_buf["测试群"][0][1], "话8")
+
+    print()
+    print("== 群聊概率闸：调低后不是条条都接 ==")
+    cfg = base_cfg(groupMode="smart", groupAddressProbability={
+        "at": 1.0, "named": 1.0, "following": 0.0})
+    # 新 -> 旧：我刚说了话，对方接了一句
+    b = make_bot(cfg, [
+        {"sender_username": "wxid_a", "content": "看了吗", "type": "文本"},
+        {"sender_username": "me", "content": "行 我去看看", "type": "文本"},
+    ])
+    g = FakeGuard(cfg)
+    called = {"n": 0}
+
+    def _gen_no(*a, **k):
+        called["n"] += 1
+        return "不该生成", ""
+    b.generate = _gen_no
+    s = {"username": "123@chatroom", "unread": 1}
+    check("following=0 时接着我的话也不接",
+          b.handle_session(s, g, True), False)
+    check("没生成也没发送", called["n"], 0)
+    check("记了 group-prob-miss",
+          any(e.get("event") == "group-prob-miss" for e in EVENTS), True)
+    check("没接的话进了缓冲", len(b._ctx_buf.get("测试群") or []), 1)
+
+    EVENTS.clear()
+    cfg = base_cfg(groupMode="smart")   # 默认全 1.0 -> 不降频
+    b = make_bot(cfg, [
+        {"sender_username": "wxid_a", "content": "看了吗", "type": "文本"},
+        {"sender_username": "me", "content": "行 我去看看", "type": "文本"},
+    ])
+    g = FakeGuard(cfg)
+    b.generate = lambda *a, **k: ("看了", "")
+    b.send_reply = lambda *a, **k: None
+    check("默认概率下照常回", b.handle_session(s, g, True), True)
+
+    print()
+    print("== 缓冲的群消息真的进了 prompt ==")
+    b = make_bot(base_cfg(groupMode="smart"), [
+        {"sender_username": "wxid_a", "content": "@我 你觉得呢", "type": "文本"},
+    ])
+    g = FakeGuard(cfg)
+    b._ctx_buf = {"测试群": [("A", "周末去爬山"), ("B", "我不去")]}
+    seen = {}
+
+    def _gen_cap(*a, **k):
+        seen["pending"] = a[6] if len(a) > 6 else k.get("pending", "")
+        return "还行吧", ""
+    b.generate = _gen_cap
+    b.send_reply = lambda *a, **k: None
+    b.handle_session({"username": "123@chatroom", "unread": 1}, g, True)
+    check("pending 带上了攒的群消息",
+          "周末去爬山" in (seen.get("pending") or ""), True)
+    check("缓冲用完就清空", b._ctx_buf.get("测试群"), None)
+
+    print()
+    print("== 发送：长回复分多条落地 ==")
+
+    class FakeGUI:
+        def __init__(self):
+            self.sent = []
+
+        def send_msg(self, text, who=None, verify=False):
+            self.sent.append(text)
+            return {"status": "成功"}
+
+    cfg = base_cfg(segmentReply=True, segmentMinChars=10, segmentMaxParts=3,
+                   typingCps=1000, voiceReply=False, voiceAlways=False,
+                   sendVerify=False)
+    b = make_bot(cfg, private_msgs())
+    fake = FakeGUI()
+    b._gui = fake
+    b._last_incoming_was_voice = False
+    b.send_reply("小A", "我今天去医院了。医生说要观察。", "", "")
+    check("长回复真的分两条发", len(fake.sent), 2)
+    check("第二条是后半句", "医生说要观察" in fake.sent[1], True)
+
+    print()
     print("== 主动发消息：时间窗与频率 ==")
     import time as _time
     import proactive

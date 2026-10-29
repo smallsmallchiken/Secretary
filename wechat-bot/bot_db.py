@@ -122,6 +122,22 @@ DEFAULTS = {
     "sendVerify": False,
     # 回复前随机等几秒。秒回是最大的 AI 破绽，也容易在对方连发时刷屏。
     "replyDelaySeconds": [2, 8],
+    # ---- 拟人化：分条发 + 打字节奏（参考 astrbot_plugin_proactive_chat）----
+    # 真人回长消息会拆成两三条发，中间还有打字停顿。这是比调 temperature
+    # 更直接的去 AI 味手段：一条工整的长消息本身就是破绽。
+    "segmentReply": True,
+    "segmentMinChars": 26,     # 短于这个字数就不拆（「行」「就这」拆了反而假）
+    "segmentMaxParts": 3,      # 最多拆几条，拆太碎像刷屏
+    "typingCps": 7,            # 模拟打字速度（字/秒），用来算段间停顿
+    "typingMaxSeconds": 5,     # 单段停顿上限，别让人等太久
+    # ---- 群聊概率闸（参考 nene-astra-bot 的 probability + reply_style）----
+    # 确定性门禁判「该我说话」之后再摇一次骰子，避免变成有问必答的机器。
+    # 默认全 1.0 = 不过滤（行为与之前完全一致）；想让群里更"手懒"就调低。
+    # at=被@  named=点了名字  following=接着我的话
+    "groupAddressProbability": {"at": 1.0, "named": 1.0, "following": 1.0},
+    # 没接话的那些消息先攒着，下次真要开口时并进上下文（group_chat_plus 的做法）。
+    # 不攒的话，隔了十几条才回一句，模型根本不知道中间发生了什么。
+    "contextBufferLimit": 12,
 }
 
 
@@ -167,6 +183,66 @@ def clean_content(m):
     return content
 
 
+# ---------------------------------------------------------------- 拟人化发送
+def split_reply(text, cfg):
+    """把一条回复拆成几条发（真人不会一口气吐一段工整的长消息）。
+
+    只在「够长」且「能自然断开」时拆，拆不出来就原样发一条 —— 宁可不拆，
+    也别把「行」和「就这」硬切成两条，那样比不拆更假。
+    """
+    t = (text or "").strip()
+    if not t:
+        return []
+    if not cfg.get("segmentReply", True):
+        return [t]
+    max_parts = max(1, int(cfg.get("segmentMaxParts", 3)))
+    min_chars = int(cfg.get("segmentMinChars", 26))
+    if max_parts == 1 or len(t) < min_chars:
+        return [t]
+
+    if "\n" in t:
+        parts = [p.strip() for p in t.split("\n") if p.strip()]
+    else:
+        # 按句末标点切，保留标点本身（切走的只是标点后面的空白）
+        parts = [p.strip() for p in re.split(r"(?<=[。！？!?…])\s*", t) if p.strip()]
+        # 人设要求「像手机打字」，模型常常整段不写句号，只用空格断句。
+        # 这种情况只按标点切会切不动（整条甩过去），所以按空格再切成两截。
+        # 不能按「攒够目标字数就断」来做 —— 尾部会被并回最后一段，结果还是
+        # 一整条（踩过）。直接按词块对半分，长度天然均衡。
+        if len(parts) <= 1 and len(t) >= 30 and t.count(" ") >= 2:
+            chunks = [c for c in t.split() if c]
+            if len(chunks) >= 3:
+                cut = max(1, len(chunks) // 2)
+                parts = [" ".join(chunks[:cut]), " ".join(chunks[cut:])]
+    if len(parts) <= 1:
+        return [t]
+    if len(parts) > max_parts:
+        # 末尾几段并成一段，别切得太碎
+        parts = parts[:max_parts - 1] + [" ".join(parts[max_parts - 1:])]
+    merged = []
+    for p in parts:
+        # 两三个字的碎句（「嗯」「就这」）并回上一段，单独发像在敷衍
+        if merged and len(p) <= 2:
+            merged[-1] = merged[-1] + p
+        else:
+            merged.append(p)
+    return merged or [t]
+
+
+def typing_delay(text, cfg):
+    """按字数估一个「正在打字」的停顿。"""
+    try:
+        cps = float(cfg.get("typingCps", 7)) or 7.0
+    except Exception:
+        cps = 7.0
+    d = len(text or "") / cps + random.uniform(0.25, 0.9)
+    try:
+        cap = float(cfg.get("typingMaxSeconds", 5))
+    except Exception:
+        cap = 5.0
+    return max(0.2, min(d, cap))
+
+
 class DbBot:
     # 主动发消息（main() 里注入）。放类属性是为了照顾 test_db_flow 那种
     # 用 __new__ 人工构造实例的离线测试。
@@ -190,6 +266,9 @@ class DbBot:
         # 永久跳过的会话：name -> 当时的未读数。未读数没变就直接跳过，
         # 连数据库都不用读（群聊模式下未读角标可能挂很久）。
         self._perm_skip = {}
+        # 没接话的消息先攒着：chat -> [(说话人, 内容)]。等到真要开口时并进
+        # 上下文，避免「隔了十几条才回一句」时模型对中间发生的事一无所知。
+        self._ctx_buf = {}
         # 主动发消息（main() 里注入，便于 status/once 时不启动它）
         self.proactive = None
         log(f"账号 {me.get('nick_name')!r} ({self.me})")
@@ -318,6 +397,51 @@ class DbBot:
 
         return False, "群友互相在聊"
 
+    # ------------------------------------------------------- 群聊概率 & 缓冲
+    def _address_prob(self, why):
+        """「该我说话」这件事有多确定 -> 0~1，用来摇骰子降频。
+
+        默认配置全是 1.0（不降频，行为和以前一致）。调低之后，比如
+        following=0.85，就是「接我的话有 15% 概率我也懒得应」—— 真人本来
+        也不是每条都接。
+        """
+        table = self.cfg.get("groupAddressProbability") or {}
+        try:
+            if why.startswith("@") and why != "@所有人":
+                return float(table.get("at", 1.0))
+            if why == "点了名字":
+                return float(table.get("named", 1.0))
+            if why == "接着我的话":
+                return float(table.get("following", 1.0))
+        except Exception:
+            pass
+        return 1.0
+
+    def _buffer(self, chat, who, content):
+        """记下一条「没接」的群消息，后面开口时当上下文用。"""
+        content = (content or "").strip()
+        if not content:
+            return
+        # 用 __dict__ 兜底：离线测试常用 __new__ 造实例，不走 __init__
+        ctx = self.__dict__.setdefault("_ctx_buf", {})
+        buf = ctx.setdefault(chat, [])
+        # 同一条消息可能因为未读数变化被重复处理，别把它攒两遍
+        if buf and buf[-1] == (who, content):
+            return
+        buf.append((who, content))
+        limit = int(self.cfg.get("contextBufferLimit", 12) or 12)
+        if len(buf) > limit:
+            del buf[:len(buf) - limit]
+
+    def _take_context(self, chat):
+        """取出并清空攒下的消息，拼成给模型看的一段。"""
+        buf = self.__dict__.setdefault("_ctx_buf", {}).pop(chat, None)
+        if not buf:
+            return ""
+        lines = "\n".join(f"[{who}] {c}" for who, c in buf)
+        return ("刚才这些你都没接（别装作没看见，知道它们在聊什么就行）：\n"
+                + lines)
+
     def _note_fail(self, g, chat, fp, limit, why):
         """同一指纹失败计数，超过 limit 次就标记已处理。
 
@@ -394,8 +518,16 @@ class DbBot:
         if is_group and self.cfg.get("groupMode", "smart") == "smart":
             addressed, why = self.group_addressed(rows, incoming)
             if not addressed:
+                self._buffer(chat, who, incoming)
                 return _skip_permanent(f"群里{why} -> 不插嘴", "group-idle",
                                        reason=why, last=incoming[:40])
+            # 该我说话确定了，但也不代表条条都接。默认 prob=1.0 不过滤。
+            prob = self._address_prob(why)
+            if prob < 1.0 and random.random() >= prob:
+                self._buffer(chat, who, incoming)
+                return _skip_permanent(
+                    f"群里{why}（{prob:.0%} 概率没抽中）-> 这次不接",
+                    "group-prob-miss", reason=why, prob=round(prob, 2))
 
         if g.already_handled(chat, fp):
             key = (chat, fp)
@@ -420,7 +552,9 @@ class DbBot:
             except Exception:
                 pass
 
-        reply, err = self.generate(chat, name, incoming, history, is_group, addressed)
+        pending = self._take_context(chat) if is_group else ""
+        reply, err = self.generate(chat, name, incoming, history, is_group,
+                                   addressed, pending)
         if reply == SKIP_TOKEN:
             log(f"  [{name}] 模型判断群里没它的事 -> 不插嘴")
             guard.log_event(event="group-skip-model", chat=chat, incoming=incoming)
@@ -455,12 +589,16 @@ class DbBot:
         log("  已发送")
         return True
 
-    def generate(self, chat, name, incoming, history, is_group, addressed=True):
+    def generate(self, chat, name, incoming, history, is_group, addressed=True,
+                 pending=""):
         """生成回复。
 
         smart 模式下群聊的「该不该插嘴」已经在 handle_session 里用确定性信号
         判过一轮，走到这里说明要么冲我来了，要么是私聊。模型手里仍留着
         [SKIP] 作为最后否决权（比如被 @ 了但那条是广告）。
+
+        pending 是这段时间我没接的群消息。群聊里我经常要隔好几条才开口，
+        不给这段上下文，模型就只会盯着最后一句答，接得驴唇不对马嘴。
 
         all 模式（用户要的「群里每条都回」）不能塞 [SKIP] 指令 —— 塞了模型
         就会自作主张地沉默，表现成「群里还是不回」。
@@ -474,8 +612,10 @@ class DbBot:
                         f"别总结、别说满，接不了就只输出 {SKIP_TOKEN}。")
             else:
                 tail = "随便接一句，别像总结发言。"
-            prompt = (f"群里最近的聊天记录：\n{history}\n\n"
-                      f"最后一条是刚刚发出来的。{tail}")
+            prompt = f"群里最近的聊天记录：\n{history}\n"
+            if pending:
+                prompt += f"\n{pending}\n"
+            prompt += f"\n最后一条是刚刚发出来的。{tail}"
             return llm.generate(prompt, system=system, cfg=None, temperature=temp)
         # 私聊：把最近几条一起给模型，才接得上刚才在聊什么
         return llm.generate(incoming, history=history, system=system,
@@ -501,16 +641,25 @@ class DbBot:
                     log(f"  语音发送失败，退回文字：{r}")
             except Exception as exc:
                 log(f"  语音失败退回文字：{type(exc).__name__}: {exc}")
-        r = self.gui.send_msg(reply, who=name, verify=cfg.get("sendVerify", False))
-        if not _send_ok(r):
-            # 「已尝试发送但结果未确认」实测是**误报**：回车已经按下、消息在群里了，
-            # 只是输入框清空的判定超时。当成失败会让下一轮把同一句话再发一遍，
-            # 所以这里按已发送处理，只在日志里留痕。
-            if _send_uncertain(r):
-                log(f"  发送未确认（多半已发出，按已发处理，避免重复）：{reply}")
-                guard.log_event(event="send-uncertain", chat=name, reply=reply)
-                return
-            raise RuntimeError(f"发送未成功：{r}")
+        # 长回复拆成两三条发，段间按字数停一下（模拟打字）。一条工整的长消息
+        # 本身就是最大的破绽，拆开发比调什么 temperature 都管用。
+        parts = split_reply(reply, cfg)
+        for i, part in enumerate(parts):
+            if i:
+                time.sleep(typing_delay(part, cfg))
+            r = self.gui.send_msg(part, who=name,
+                                  verify=cfg.get("sendVerify", False))
+            if not _send_ok(r):
+                # 「已尝试发送但结果未确认」实测是**误报**：回车已经按下、消息在
+                # 群里了，只是输入框清空的判定超时。当成失败会让下一轮把同一句
+                # 话再发一遍，所以这里按已发送处理，只在日志里留痕。
+                if _send_uncertain(r):
+                    log(f"  发送未确认（多半已发出，按已发处理，避免重复）：{part}")
+                    guard.log_event(event="send-uncertain", chat=name, reply=part)
+                    continue
+                raise RuntimeError(f"发送未成功：{r}")
+        if len(parts) > 1:
+            log(f"  分成 {len(parts)} 条发出")
 
     def round(self, g, live):
         if guard.stop_requested():
@@ -691,6 +840,14 @@ def main():
         print(f"语音：voiceReply={cfg.get('voiceReply')} "
               f"voiceAlways={cfg.get('voiceAlways')} "
               f"发送方式={cfg.get('voiceSendMode')}")
+        gp = cfg.get("groupAddressProbability") or {}
+        print(f"拟人化：分段发送={'开' if cfg.get('segmentReply') else '关'}"
+              f"（≥{cfg.get('segmentMinChars')}字拆≤{cfg.get('segmentMaxParts')}条，"
+              f"打字{cfg.get('typingCps')}字/秒）"
+              f" 回复前等{cfg.get('replyDelaySeconds')}秒")
+        print(f"群聊概率：@={gp.get('at')} 点名={gp.get('named')} "
+              f"接话={gp.get('following')}（1.0=不过滤）"
+              f" 未接话缓冲={cfg.get('contextBufferLimit')}条")
         p = proactive.Proactive(bot, cfg)
         print(f"主动发消息：{'开' if p.cfg.get('enabled') else '关'} "
               f"{p.cfg['activeHours'][0]}–{p.cfg['activeHours'][1]}点 "
