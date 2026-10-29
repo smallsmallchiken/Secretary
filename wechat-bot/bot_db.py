@@ -29,6 +29,7 @@ sys.path.insert(0, HERE)
 
 import guard
 import llm
+import media_send
 import proactive
 
 CONFIG = os.path.join(HERE, "bot-db-config.json")
@@ -84,7 +85,31 @@ GROUP_RULES = """你现在在一个微信群里。看群聊记录时注意：
 - 如果有人骂你、让你闭嘴、明说不欢迎你说话，直接输出 [SKIP]，一句都别争
 - 同一个话题你已经说过了就别重复表态，别人没接你的话就说明没人想聊这个"""
 
+# 带表情的规则。只在配置开了 emojiReply / stickerReply 时注入——
+# 没开却教模型输出标记，它会照做，然后标记被当成普通文字发出去。
+MEDIA_RULES = """想说点什么又懒得打字的时候，可以发个表情代替：
+- 回复最后单独写 [[表情]]，我会替你发一个微信表情。大多数时候不用，十条里一两条就够
+- 想发表情包就写 [[表情包]]
+- 只发表情不说话也行，那就整条回复只写 [[表情]]
+- 这个标记必须原样写，别解释、别翻译、别加在句子中间"""
+
 SKIP_TOKEN = "[SKIP]"
+
+# 模型想在回复里顺手带个表情/表情包时输出的标记。
+# 用双方括号是为了和输入侧的占位符 [表情] 区分开——那个表示「对方发了表情」，
+# 单方括号会和它撞车，模型会把占位符自己也输出出来。
+TOKEN_EMOJI = re.compile(r"[\[【]{2}\s*(?:表情|emoji)\s*[\]】]{2}", re.I)
+TOKEN_STICKER = re.compile(r"[\[【]{2}\s*(?:表情包|sticker)\s*[\]】]{2}", re.I)
+
+
+def split_media_tokens(text):
+    """把回复里的 [[表情]] / [[表情包]] 剥出来。返回 (干净文本, 要表情, 要表情包)。"""
+    if not text:
+        return "", False, False
+    want_sticker = bool(TOKEN_STICKER.search(text))
+    want_emoji = bool(TOKEN_EMOJI.search(text))
+    clean = TOKEN_STICKER.sub("", TOKEN_EMOJI.sub("", text)).strip()
+    return clean, want_emoji, want_sticker
 
 # 对方明确要语音时也回语音（QQ 那边同一套触发词）
 VOICE_TRIGGER = re.compile(r"发(条|个)?语音|语音回|用语音|语音说|说句话听听|语音呢")
@@ -154,6 +179,8 @@ def build_system_prompt(cfg, is_group):
         STYLE_RULES,
         FORMAT_RULES,
     ]
+    if cfg.get("emojiReply") or cfg.get("stickerReply"):
+        parts.append(MEDIA_RULES)
     if is_group and cfg.get("groupMode", "smart") == "smart":
         parts.append(GROUP_RULES)
     return "\n\n".join(parts)
@@ -269,6 +296,8 @@ class DbBot:
         # 没接话的消息先攒着：chat -> [(说话人, 内容)]。等到真要开口时并进
         # 上下文，避免「隔了十几条才回一句」时模型对中间发生的事一无所知。
         self._ctx_buf = {}
+        # 最新一条对方消息的类型（文字/表情/语音…），决定要不要镜像回个表情
+        self._last_incoming_type = ""
         # 主动发消息（main() 里注入，便于 status/once 时不启动它）
         self.proactive = None
         log(f"账号 {me.get('nick_name')!r} ({self.me})")
@@ -355,6 +384,21 @@ class DbBot:
             history = "\n".join(("我: " if mine else "对方: ") + c
                                 for mine, _, c, _ in rows)
         return incoming, history, who, last_type == "语音", rows
+
+    def incoming_from_marked(self, username, is_group, limit=None):
+        """incoming_from 的包装：顺手记下最新一条的类型。
+
+        发表情那套要按「对方发来的是不是表情」决定要不要镜像回一个，
+        但改 incoming_from 的返回签名会牵连所有调用点和测试，用属性传递更省事。
+        """
+        r = self.incoming_from(username, is_group, limit)
+        try:
+            rows = r[4]
+            last_mine = rows[-1][0] if rows else True
+            self._last_incoming_type = "" if last_mine else (rows[-1][3] or "")
+        except Exception:
+            self._last_incoming_type = ""
+        return r
 
     # ------------------------------------------------------------ 群聊语境
     def group_addressed(self, rows, incoming):
@@ -475,7 +519,7 @@ class DbBot:
         if self._perm_skip.get(name) == unread_n:
             return False  # 上次已判定永久跳过，未读数没变就不用再读库
 
-        incoming, history, who, was_voice, rows = self.incoming_from(username, is_group)
+        incoming, history, who, was_voice, rows = self.incoming_from_marked(username, is_group)
         self._last_incoming_was_voice = was_voice
         if not incoming:
             # 读不到内容时没有可用指纹，只能靠计数封顶，不然每 0.5s 刷一条日志
@@ -623,26 +667,73 @@ class DbBot:
 
     def send_reply(self, name, reply, username, incoming=""):
         cfg = self.cfg
+        reply, want_emoji, want_sticker = split_media_tokens(reply)
+        incoming_type = getattr(self, "_last_incoming_type", "")
         want_voice = (
             cfg.get("voiceAlways")
             or (cfg.get("voiceReply") and self._last_incoming_was_voice)
             or bool(VOICE_TRIGGER.search(incoming or ""))
             or bool(VOICE_TRIGGER.search(reply or ""))
         )
-        if want_voice:
-            try:
-                path = tts_to_file(reply, cfg)
-                if path:
-                    # PC 微信只能把音频当文件发（聊天气泡那个语音条只能实时录麦克风）
-                    r = self.gui.send_file(path, who=name)
-                    if _send_ok(r) or _send_uncertain(r):
-                        log(f"  已发语音（{os.path.basename(path)}）")
-                        return
-                    log(f"  语音发送失败，退回文字：{r}")
-            except Exception as exc:
-                log(f"  语音失败退回文字：{type(exc).__name__}: {exc}")
+        if want_voice and reply:
+            if self._send_voice(name, reply, cfg):
+                return
         # 长回复拆成两三条发，段间按字数停一下（模拟打字）。一条工整的长消息
         # 本身就是最大的破绽，拆开发比调什么 temperature 都管用。
+        if reply:
+            self._send_text(name, reply, cfg)
+        self._send_facial(name, want_emoji, want_sticker, incoming_type, cfg)
+
+    def _send_voice(self, name, reply, cfg):
+        """发语音。voiceSendMode=voice 发真正的语音条，file 发音频文件。"""
+        mode = cfg.get("voiceSendMode", "file")
+        try:
+            if mode == "voice":
+                if media_send.send_voice(self.gui, reply, cfg):
+                    log("  已发语音条")
+                    return True
+                log("  语音条发送失败，退回文字")
+                return False
+            if mode == "file":
+                path = tts_to_file(reply, cfg)
+                if path:
+                    r = self.gui.send_file(path, who=name)
+                    if _send_ok(r) or _send_uncertain(r):
+                        log(f"  已发语音文件（{os.path.basename(path)}）")
+                        return True
+                    log(f"  语音文件发送失败，退回文字：{r}")
+        except Exception as exc:
+            log(f"  语音失败退回文字：{type(exc).__name__}: {exc}")
+        return False
+
+    def _send_facial(self, name, want_emoji, want_sticker, incoming_type, cfg):
+        """发表情 / 表情包。
+
+        三种触发：模型主动要（[[表情]] 标记）、对方发来表情时的镜像回应、
+        以及偶尔自己冒一个。都没有就什么都不做。
+        """
+        if not (cfg.get("emojiReply") or cfg.get("stickerReply")):
+            return False
+        echoed = (incoming_type == "表情"
+                  and random.random() < float(cfg.get("emojiOnEmoji", 0.5)))
+        natural = random.random() < float(cfg.get("emojiProbability", 0))
+        if not (want_emoji or want_sticker or echoed or natural):
+            return False
+        try:
+            hwnd = getattr(self.gui, "main_hwnd", None)
+            if want_sticker or (cfg.get("stickerReply") and random.random() < 0.5):
+                path = media_send.pick_sticker(cfg)
+                if path and media_send.send_image(self.gui, path, name):
+                    log(f"  已发表情包（{os.path.basename(path)}）")
+                    return True
+            if cfg.get("emojiReply") and media_send.send_emoji(self.gui, hwnd, name):
+                return True
+        except Exception as exc:
+            log(f"  发表情失败（不影响文字）：{type(exc).__name__}: {exc}")
+        return False
+
+    def _send_text(self, name, reply, cfg):
+        """长回复拆成两三条发，段间按字数停一下（模拟打字）。"""
         parts = split_reply(reply, cfg)
         for i, part in enumerate(parts):
             if i:
@@ -848,6 +939,15 @@ def main():
         print(f"群聊概率：@={gp.get('at')} 点名={gp.get('named')} "
               f"接话={gp.get('following')}（1.0=不过滤）"
               f" 未接话缓冲={cfg.get('contextBufferLimit')}条")
+        sticker_dir = cfg.get("stickerDir") or os.path.join(HERE, "stickers")
+        n_sticker = (len([f for f in os.listdir(sticker_dir)
+                          if f.lower().endswith((".gif", ".png", ".jpg", ".webp"))])
+                     if os.path.isdir(sticker_dir) else 0)
+        print(f"表情：内置={'开' if cfg.get('emojiReply') else '关'}"
+              f" 随机{int(float(cfg.get('emojiProbability', 0)) * 100)}%"
+              f" 被发表情时回{int(float(cfg.get('emojiOnEmoji', 0)) * 100)}%"
+              f" ／ 表情包={'开' if cfg.get('stickerReply') else '关'}"
+              f" 素材{n_sticker}张")
         p = proactive.Proactive(bot, cfg)
         print(f"主动发消息：{'开' if p.cfg.get('enabled') else '关'} "
               f"{p.cfg['activeHours'][0]}–{p.cfg['activeHours'][1]}点 "

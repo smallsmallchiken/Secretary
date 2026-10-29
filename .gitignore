@@ -42,6 +42,8 @@ wechat-bot/bot-state.json
 wechat-bot/bot-db-state.json
 wechat-bot/_*.png
 wechat-bot/*-src.png
+# 探测过程的临时截图（表情面板标定等）
+wechat-bot/_probe/
 wechatauto_logs/
 # 含登录账号 / 本地绝对路径的配置，不入库
 wechat-bot/bot-config.json

@@ -363,6 +363,61 @@ def main():
     check("第二条是后半句", "医生说要观察" in fake.sent[1], True)
 
     print()
+    print("== 表情 / 表情包标记 ==")
+    check("剥掉 [[表情]] 标记", bot_db.split_media_tokens("行吧 [[表情]]"),
+          ("行吧", True, False))
+    check("只发表情时正文为空", bot_db.split_media_tokens("[[表情]]"),
+          ("", True, False))
+    check("表情包标记", bot_db.split_media_tokens("给你看 [[表情包]]")[2], True)
+    check("没有标记不动正文", bot_db.split_media_tokens("就这"),
+          ("就这", False, False))
+    check("输入侧的 [表情] 占位符不被误认成标记",
+          bot_db.split_media_tokens("对方发了[表情]")[1], False)
+
+    # 真操作微信的调用一律打桩：测试里绝不能碰真实客户端
+    media_calls = []
+    _orig = (bot_db.media_send.send_emoji, bot_db.media_send.send_voice,
+             bot_db.media_send.send_image, bot_db.media_send.pick_sticker)
+    bot_db.media_send.send_emoji = (
+        lambda gui, hwnd, who, **k: media_calls.append("emoji") or True)
+    bot_db.media_send.send_voice = (
+        lambda gui, text, cfg, **k: media_calls.append("voice") or True)
+    bot_db.media_send.send_image = (
+        lambda gui, path, who, **k: media_calls.append("sticker") or True)
+    bot_db.media_send.pick_sticker = lambda cfg, **k: "/tmp/fake.gif"
+    try:
+        def _run(cfg, reply, incoming_type=""):
+            media_calls.clear()
+            bb = make_bot(cfg, private_msgs())
+            bb._gui = FakeGUI()
+            bb._last_incoming_type = incoming_type
+            bb._last_incoming_was_voice = False
+            bb.send_reply("小A", reply, "", "")
+            return list(media_calls)
+
+        check("开了 emojiReply 且模型要表情 -> 发",
+              _run(base_cfg(emojiReply=True, emojiProbability=0), "行 [[表情]]"),
+              ["emoji"])
+        check("没开 emojiReply -> 标记也不发",
+              _run(base_cfg(), "行 [[表情]]"), [])
+        check("没标记也没概率 -> 什么都不发",
+              _run(base_cfg(emojiReply=True, emojiProbability=0), "行"), [])
+        check("对方发表情 -> 镜像回一个",
+              _run(base_cfg(emojiReply=True, emojiProbability=0,
+                            emojiOnEmoji=1.0), "嗯", incoming_type="表情"),
+              ["emoji"])
+        check("表情包优先于内置表情",
+              _run(base_cfg(emojiReply=True, stickerReply=True,
+                            emojiProbability=0), "给你看 [[表情包]]"),
+              ["sticker"])
+        check("voiceSendMode=voice 走语音条",
+              _run(base_cfg(voiceAlways=True, voiceSendMode="voice",
+                            emojiReply=False), "听见没"), ["voice"])
+    finally:
+        (bot_db.media_send.send_emoji, bot_db.media_send.send_voice,
+         bot_db.media_send.send_image, bot_db.media_send.pick_sticker) = _orig
+
+    print()
     print("== 主动发消息：时间窗与频率 ==")
     import time as _time
     import proactive
