@@ -26,14 +26,16 @@
 
 ## 怎么跑
 
-脚本里用的是相对导入 `import ocr` 这种，所以要把 `wechat-bot/` 放进 `PYTHONPATH`：
+脚本里的 `sys.path` 已经指向上一级（`wechat-bot/`），所以直接跑就行：
 
 ```bash
 cd wechat-bot
-PYTHONPATH=. ./py312/python.exe lab/probe.py
+./py312/python.exe lab/probe.py
 ```
+
+产物（`tree.txt`、`ascii-src.png` 等）会写在 `lab/` 目录下，不会弄脏根目录。
 
 ## 已经失效的部分
 
-`probe*.py` 里写的 Python 路径是 `.workbuddy/wechat-bot/.venv/Scripts/python.exe`，
+`probe*.py` 的注释里写的 Python 路径是 `.workbuddy/wechat-bot/.venv/Scripts/python.exe`，
 那是项目搬到 `wechat-bot/py312` 之前的位置。现在统一用 `wechat-bot/py312/python.exe`。

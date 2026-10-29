@@ -49,6 +49,9 @@ wechatauto_logs/
 wechat-bot/@AutomationLog.txt
 wechat-bot/*.bak
 wechat-bot/*.zip
+# lab/ 里探测脚本的产物（控件树 dump、字符画、截图）
+wechat-bot/lab/*.txt
+wechat-bot/lab/*.png
 # 含登录账号 / 本地绝对路径的配置，不入库
 wechat-bot/bot-config.json
 wechat-bot/bot-db-config.json
