@@ -419,6 +419,16 @@ function normSay(text) {
     .toLowerCase();
 }
 
+// 句尾语气词：只认"多了一个语气词"，不认多出来的实词
+// 「晚安呀」= 「晚安」；「在呢 说」≠「在呢」（说了两件事，不能只念半句）
+const TAIL_PARTICLE = /[啊呀呢哦啦吧嘛哈咯喔噢嘞咧]+$/;
+
+/** 剥掉句尾语气词，用来判断"是不是同一句只是多了个尾巴" */
+function stripTailParticle(text) {
+  const n = normSay(text);
+  return n.replace(TAIL_PARTICLE, '');
+}
+
 /**
  * 找现成音频。优先级：预置片段 > 同文本的合成缓存（含"只差标点"的命中）。
  * @returns 文件绝对路径，没有就 null
@@ -431,6 +441,12 @@ function findVoice(text, voice, model) {
   if (!hit) {
     const n = normSay(clean);
     if (n) hit = idx.voice.find((x) => x.kind === 'preset' && normSay(x.text) === n);
+    if (!hit && n) {
+      const bare = stripTailParticle(clean);
+      if (bare && bare !== n) {
+        hit = idx.voice.find((x) => x.kind === 'preset' && normSay(x.text) === bare);
+      }
+    }
   }
   if (hit && voiceFileExists(hit.id)) {
     noteVoiceUsed(hit.id);
@@ -458,8 +474,9 @@ function voiceById(id) {
 }
 
 /**
- * 按文字找预置片段。三步：原样 → 去标点空白 → 长度接近的互相包含。
- * 模型写「好的！」「晚安呀」这种擦边说法也算命中，省一次现场合成。
+ * 按文字找预置片段。三步：原样 → 去标点空白 → 剥掉句尾语气词。
+ * 「好的！」「晚安呀」这种擦边说法也算命中，省一次现场合成；
+ * 但绝不跨语义硬套（「在呢 说」不会被念成「在呢」）。
  */
 function findPreset(text) {
   const clean = String(text || '').trim();
@@ -476,14 +493,10 @@ function findPreset(text) {
   const same = presets.find((x) => normSay(x.text) === n);
   if (same) return hit(same);
 
-  // 只认长度接近的，且至少两个字：「好的呀」→「好的」可以，
-  // 「好」→「好耶」不行（差一个字意思就变了，宁可现场合成）
-  if (n.length < 2) return null;
-  const loose = presets.find((x) => {
-    const t = normSay(x.text);
-    return t && (t.includes(n) || n.includes(t)) && Math.abs(t.length - n.length) <= 3;
-  });
-  return loose ? hit(loose) : null;
+  const bare = stripTailParticle(clean);
+  if (!bare || bare === n) return null;
+  const tail = presets.find((x) => normSay(x.text) === bare);
+  return tail ? hit(tail) : null;
 }
 
 function listPresets() {
@@ -709,6 +722,7 @@ module.exports = {
   migrateLegacy,
   voiceHash,
   normSay,
+  stripTailParticle,
   findVoice,
   voiceById,
   findPreset,

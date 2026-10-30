@@ -441,6 +441,22 @@ async function main() {
       });
       check('带标点也能命中预置', ttsCalls.length === beforePunct, `多调了 ${ttsCalls.length - beforePunct} 次`);
 
+      // 用例：多一个语气词算命中；多一句实词不算（否则会只念半句话）
+      const zaiPath = mediaLib.putVoice(Buffer.from('ID3-preset-zai'), {
+        text: '在呢', kind: 'preset', voice: 'test', model: 'test'
+      });
+      check('再造一条预置「在呢」', !!zaiPath);
+      check(
+        '语气词不算差异（晚安呀 → 晚安）',
+        (mediaLib.findPreset('晚安呀') || {}).text === '晚安',
+        String((mediaLib.findPreset('晚安呀') || {}).text)
+      );
+      check(
+        '多一句实词不算命中（在呢 说）',
+        !mediaLib.findPreset('在呢 说'),
+        String((mediaLib.findPreset('在呢 说') || {}).text)
+      );
+
       // 用例：清单外的话太长（>60 字）就不合成，退化成文字，别让人干等
       const longSay = '这句话实在太长了'.repeat(10);
       const beforeTooLong = ttsCalls.length;
