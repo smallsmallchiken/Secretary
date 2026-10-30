@@ -39,13 +39,14 @@ function buildSystemPrompt(personaText, memeList, opts = {}) {
       : `我这个人设是：${persona}\n\n重要：下面的「风格示范」只教你怎么把话说得短、口语、不像 AI。如果示范里的话语气跟你的人设冲突，一律以人设为准，别模仿示范的语气。`;
   const memeBlock =
     memeList && memeList.trim()
-      ? `\n\n手头有一批表情包可以随回复发出去，格式是 [图:文件名]：
+      ? `\n\n手头有一批表情包，清单格式是「序号. 什么场合用」：
 ${memeList.trim()}
 
 配图规矩：
-- 觉得有一张特别搭的时候，把 [图:文件名] 写在回复的最末尾；只发图不说话也行（整条回复就写 [图:文件名]）
-- 大多数时候别配图，硬凑很尬；一次最多一张
-- 只能从上面清单里挑，别的图你没有`
+- 对方点名要表情包/梗图/图片，或者明显在斗图、跟你贫嘴起哄 → 必须发一张，别光用嘴硬糊弄过去
+- 平常聊得投缘也能顺手发一张，但别每句都发；一次最多一张
+- 发法：在回复最末尾写 [图:序号]，比如 [图:7]；只想发图不说话，整条回复就只写 [图:序号]
+- 序号只能取上面清单里的，别自己编；只发图那就不带文字`
       : '';
   const voiceBlock =
     opts.voiceList && opts.voiceList.trim()
@@ -373,9 +374,44 @@ const MEME_DESC_PROMPT =
   '这是一张表情包/梗图。用不超过15个字概括它适合在什么情绪或场景下发（比如：无语了、看乐子、嘲讽拉满、可爱卖萌）。只输出那句话，别描述画面细节。';
 
 function memeFile(name) {
-  const hit = media.findPic(name);
+  const hit = media.findPicLoose(name);
   return hit ? hit.path : null;
 }
+
+/**
+ * 提示词里的表情清单：序号 + 用途，不再让模型复述中文长文件名。
+ * 之前实测：清单是 [图:dsf-268-GLM娘喊着借过冲刺，Gemi.webp] 这种，
+ * 模型要么懒得抄、要么抄错一个字 → 解析不到 → 静默不发图。
+ * 返回 { text, items }，items[i] 就是序号 i+1 对应的库条目，解析时按同一份数组。
+ */
+function picPromptList(max = MEME_LIST_MAX) {
+  const items = media.balancedPics
+    ? media.balancedPics({ kind: 'sticker', max })
+    : media.listPics({ kind: 'sticker', withDesc: true }).slice(0, max);
+  const text = items
+    .map((x, i) => `${i + 1}. ${String(x.desc || x.id).slice(0, 60)}`)
+    .join('\n');
+  return { text, items };
+}
+
+/** 把模型写的 [图:x] 解析成实际文件：x 可以是序号、文件名、或用途描述 */
+function resolveMeme(token, items) {
+  const t = String(token || '').trim().replace(/^[#＃]/, '');
+  if (!t) return null;
+  if (/^\d+$/.test(t) && items) {
+    const it = items[Number(t) - 1];
+    if (it) {
+      const p = path.join(media.picsDir(), it.id);
+      if (fs.existsSync(p)) return p;
+    }
+    // 序号越界就往下试，也许模型写的就是文件名里的数字
+  }
+  return memeFile(t);
+}
+
+// 对方明确要表情包/图片，或者明显在斗图——模型没挑图时兜底发一张
+const PIC_WANT_RE =
+  /发(?:个|张|点|些|几个|几张|一个|一张|一堆)?(?:表情|表情包|图|图片|梗图|图包|贴纸)|表情包呢|来张图|整点图|来点图|斗图|有没有(?:表情|图)/;
 
 /** 收藏一张图（Buffer）进共享池。重复图（md5 相同）直接跳过。异步不阻塞回复。 */
 async function collectMeme(buf) {
@@ -425,7 +461,7 @@ async function describeMeme(item) {
 
 /** 提示词用的表情包清单（有描述的按新到旧取一批） */
 function memeListText() {
-  return media.picListText({ kind: 'sticker', max: MEME_LIST_MAX });
+  return picPromptList().text;
 }
 
 function audioBase(llmCfg, tail) {
@@ -527,12 +563,14 @@ async function generateReply({ history, incoming, imageUri, cfg, isGroup, addres
     user.push(`对方刚发来的消息：${incoming}\n\n请直接给出要回复的那句话。`);
   }
   const userText = user.join('\n\n');
+  // 表情清单和解析必须共用同一份数组，否则序号对不上
+  const picList = cfg.memes ? picPromptList() : { text: '', items: [] };
 
   const msg = await llm.chat({
     messages: [
       {
         role: 'system',
-        content: buildSystemPrompt(cfg.persona, cfg.memes ? memeListText() : '', {
+        content: buildSystemPrompt(cfg.persona, picList.text, {
           isGroup,
           voiceList: cfg.voiceReply ? media.presetListText() : ''
         })
@@ -552,10 +590,22 @@ async function generateReply({ history, incoming, imageUri, cfg, isGroup, addres
     allowTools: false,
     temperature: 1.0 // 高一点更活，太正经就往上加
   });
-  // 拆出配图标记：[图:meme-x.ext]，其余走正常清洗
+  // 拆出配图标记：[图:序号]（也认文件名/用途描述），其余走正常清洗
   const raw = String(msg.content || '');
-  const memeTag = raw.match(/\[图[:：]\s*([^\]\s]+)\]/);
-  const memePath = memeTag ? memeFile(memeTag[1]) : null;
+  const memeTag = raw.match(/\[图[:：]\s*([^\]\n]+?)\s*\]/);
+  let memePath = null;
+  if (memeTag) {
+    memePath = resolveMeme(memeTag[1], picList.items);
+    if (!memePath) dbg('[qq] 配图标记没对上，这张没发：', memeTag[1]);
+  }
+  // 对方点名要图/在斗图，模型却没挑（或挑了没对上）→ 从库里随机兜底一张
+  if (!memePath && picList.items.length && PIC_WANT_RE.test(incoming) && !/\[SKIP\]/.test(raw)) {
+    const fallback = media.pickPic({ kind: 'sticker' });
+    if (fallback) {
+      memePath = fallback.path;
+      dbg('[qq] 对方要图、模型没挑，随机兜底：', path.basename(fallback.path));
+    }
+  }
   // 拆出预置语音标记：[语音:晚安] → 共享语音池里的现成 mp3
   const voiceTag = raw.match(/\[语音[:：]\s*([^\]]+)\]/);
   const voicePath = voiceTag ? media.findPreset(voiceTag[1].trim()) : null;
@@ -1044,5 +1094,5 @@ module.exports = {
   shutdown,
   setNotifier,
   // 内部函数导出仅供测试
-  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, media, ttsToFile }
+  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile }
 };

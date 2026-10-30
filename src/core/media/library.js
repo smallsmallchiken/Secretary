@@ -330,6 +330,32 @@ function findPic(id) {
   return hit ? { ...hit, path: p } : { id: n, path: p, kind: guessKind(n), desc: '' };
 }
 
+/**
+ * 宽松解析：模型不一定能精确复述文件名（中文、逗号、引号、长名截断都容易走样）。
+ * 顺序：精确 id → 去扩展名 → id 包含 → desc 精确 → desc 包含。
+ * 多命中时随机挑一张（说明模型给的是模糊类别，比如「无语」），总比一张不发好。
+ */
+function findPicLoose(name) {
+  const raw = String(name || '').trim();
+  if (!raw) return null;
+  const direct = findPic(raw);
+  if (direct) return direct;
+
+  const idx = loadIndex();
+  const pool = idx.pics.filter((x) => fs.existsSync(path.join(picsDir(), x.id)));
+  const low = raw.toLowerCase();
+  const stem = (s) => String(s).replace(/\.[^.]+$/, '').toLowerCase();
+
+  let hits = pool.filter((x) => stem(x.id) === low);
+  if (!hits.length) hits = pool.filter((x) => x.id.toLowerCase().includes(low));
+  if (!hits.length) hits = pool.filter((x) => String(x.desc || '').toLowerCase() === low);
+  if (!hits.length) hits = pool.filter((x) => String(x.desc || '').toLowerCase().includes(low));
+  if (!hits.length) return null;
+
+  const pick = hits[Math.floor(Math.random() * hits.length)];
+  return { ...pick, path: path.join(picsDir(), pick.id) };
+}
+
 /** 视觉模型打完标后回写用途描述 */
 function setPicDesc(id, desc) {
   const n = safeName(id);
@@ -520,6 +546,73 @@ function picListText(opts = {}) {
   return list.map((x) => `[图:${x.id}] = ${x.desc}`).join('\n');
 }
 
+/**
+ * 按 tag 均衡采样的表情条目（返回数组，调用方自己决定怎么排成文本）。
+ *
+ * 大肥鱼图（from='blue-fish'）的 desc 是 "tag1/tag2:alt" 格式，直接按 tag
+ * 分组轮询，保证每个情绪桶至少有一张出现在提示词里——否则 268 张大肥鱼
+ * 按时间倒序会把前面 119 张 bqb 表情全埋掉，模型只会发最新那批。
+ *
+ * 非 blue-fish 的图照旧按时间倒序排前面。
+ */
+function balancedPics(opts = {}) {
+  const max = opts.max || 25;
+  const all = listPics({ kind: opts.kind || 'sticker', withDesc: true });
+
+  // 拆两堆：大肥鱼 vs 其他
+  const dfish = [];
+  const other = [];
+  for (const p of all) {
+    if (p.from === 'blue-fish') dfish.push(p);
+    else other.push(p);
+  }
+
+  // 其他表情：按时间倒序，最多占 max 的 40%（让大肥鱼也露脸，但别全是它）
+  const otherQuota = Math.min(other.length, Math.ceil(max * 0.4));
+  other.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+  const otherPicked = other.slice(0, otherQuota);
+
+  // 大肥鱼：按 tag 分组，每个桶轮一圈，凑满剩余名额
+  const dfishQuota = max - otherPicked.length;
+  const byTag = new Map();
+  for (const p of dfish) {
+    const desc = String(p.desc || '');
+    const colonIdx = desc.indexOf(':');
+    const tags = colonIdx > 0
+      ? desc.slice(0, colonIdx).split('/').map((t) => t.trim()).filter(Boolean)
+      : ['未分类'];
+    const tag = tags[0] || '未分类'; // 只用第一个 tag 做桶
+    if (!byTag.has(tag)) byTag.set(tag, []);
+    byTag.get(tag).push(p);
+  }
+
+  // 每桶按 addedAt 倒序
+  for (const arr of byTag.values()) {
+    arr.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+  }
+
+  // 轮询：每个 tag 桶轮流取一张，直到凑满 dfishQuota
+  const dfishPicked = [];
+  const buckets = [...byTag.values()];
+  while (dfishPicked.length < dfishQuota && buckets.some((b) => b.length)) {
+    for (const bucket of buckets) {
+      if (dfishPicked.length >= dfishQuota) break;
+      const item = bucket.shift();
+      if (item) dfishPicked.push(item);
+    }
+  }
+
+  // 合并：先其他（更泛用），再大肥鱼（有分类），顺序对模型也友好
+  return [...otherPicked, ...dfishPicked];
+}
+
+/** 文本版（日志/测试/兼容旧调用）：[图:id] = 用途 */
+function picListTextBalanced(opts = {}) {
+  return balancedPics(opts)
+    .map((x) => `[图:${x.id}] = ${x.desc}`)
+    .join('\n');
+}
+
 /** 提示词里给模型看的预置语音清单：[语音:文字] */
 function presetListText(max = 20) {
   const list = listPresets()
@@ -549,6 +642,7 @@ module.exports = {
   addPic,
   listPics,
   findPic,
+  findPicLoose,
   pickPic,
   setPicDesc,
   picPath,
@@ -562,6 +656,8 @@ module.exports = {
   listPresets,
   putVoice,
   picListText,
+  balancedPics,
+  picListTextBalanced,
   presetListText,
   stats
 };

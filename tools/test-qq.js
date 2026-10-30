@@ -303,12 +303,19 @@ async function main() {
       fs.writeFileSync(path.join(PICS_DIR, 'meme-1.png'), Buffer.from('fakepngdata-'.repeat(300)));
       mediaLib.syncFromDisk(true); // 手工丢进目录的素材靠这一句进索引
       mediaLib.setPicDesc('meme-1.png', '无语时用');
-      check('表情包清单可读', _internals.memeListText().includes('meme-1.png'));
+      const listText = _internals.memeListText();
+      check('表情包清单带序号', /^1\. /.test(listText), listText.slice(0, 60));
       check(
         '清单带用途描述',
-        _internals.memeListText().includes('无语时用'),
-        _internals.memeListText()
+        listText.includes('无语时用'),
+        listText
       );
+      // 清单和解析共用同一份数组：序号能落到真实文件
+      const pl = _internals.picPromptList();
+      const byIndex = _internals.resolveMeme('1', pl.items);
+      check('序号能解析到文件', !!byIndex && fs.existsSync(byIndex), String(byIndex));
+      check('文件名仍能解析（兼容旧格式）', _internals.resolveMeme('meme-1.png', pl.items) === byIndex);
+      check('用途描述也能解析', _internals.resolveMeme('无语时用', pl.items) === byIndex);
 
       // llm 桩临时改成只回配图标记（纯图无文字）
       const origBehavior = llmStub.behavior;
@@ -327,6 +334,32 @@ async function main() {
         '纯图回复不带空文字段',
         imgSent && imgSent.params.message.every((s) => s.type !== 'text' || (s.data.text || '').trim()),
         imgSent && JSON.stringify(imgSent.params.message)
+      );
+
+      // 用例 J2：模型改用序号标记 [图:1]（新提示词格式）同样能发
+      llmStub.behavior = () => '就这 [图:1]';
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'private', sub_type: 'friend',
+        user_id: 10001, message_id: 401, message: [{ type: 'text', data: { text: '再来一张' } }]
+      });
+      const idxSent = received.filter((r) => r.action === 'send_private_msg').pop();
+      check(
+        '序号标记能发图',
+        idxSent && idxSent.params.message.some((s) => s.type === 'image'),
+        idxSent && JSON.stringify(idxSent.params.message)
+      );
+
+      // 用例 J3：对方点名要表情包、模型硬不挑 → 兜底随机发一张（不能只剩嘴硬）
+      llmStub.behavior = () => '没有 不给';
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'private', sub_type: 'friend',
+        user_id: 10001, message_id: 402, message: [{ type: 'text', data: { text: '发个表情包' } }]
+      });
+      const fbSent = received.filter((r) => r.action === 'send_private_msg').pop();
+      check(
+        '要表情包时兜底发图',
+        fbSent && fbSent.params.message.some((s) => s.type === 'image'),
+        fbSent && JSON.stringify(fbSent.params.message)
       );
       llmStub.behavior = origBehavior; // 还原桩
 
