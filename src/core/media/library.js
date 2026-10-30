@@ -567,10 +567,21 @@ function balancedPics(opts = {}) {
     else other.push(p);
   }
 
-  // 其他表情：按时间倒序，最多占 max 的 40%（让大肥鱼也露脸，但别全是它）
+  // 冷门优先：用得少的先上，同热度内随机。
+  // 不这么排的话，清单永远是最新那 25 张，库里另外 361 张永远没机会出场。
+  const shuffled = (arr) => {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  };
+  const byCold = (arr) => shuffled(arr).sort((a, b) => (a.uses || 0) - (b.uses || 0));
+
+  // 其他表情：最多占 max 的 40%（让大肥鱼也露脸，但别全是它）
   const otherQuota = Math.min(other.length, Math.ceil(max * 0.4));
-  other.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
-  const otherPicked = other.slice(0, otherQuota);
+  const otherPicked = byCold(other).slice(0, otherQuota);
 
   // 大肥鱼：按 tag 分组，每个桶轮一圈，凑满剩余名额
   const dfishQuota = max - otherPicked.length;
@@ -586,9 +597,9 @@ function balancedPics(opts = {}) {
     byTag.get(tag).push(p);
   }
 
-  // 每桶按 addedAt 倒序
-  for (const arr of byTag.values()) {
-    arr.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+  // 每桶也按冷门优先排，保证桶里的图能轮着来
+  for (const [tag, arr] of byTag) {
+    byTag.set(tag, byCold(arr));
   }
 
   // 轮询：每个 tag 桶轮流取一张，直到凑满 dfishQuota
@@ -644,6 +655,7 @@ module.exports = {
   findPic,
   findPicLoose,
   pickPic,
+  notePicUsed,
   setPicDesc,
   picPath,
   guessKind,

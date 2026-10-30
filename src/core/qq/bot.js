@@ -402,11 +402,17 @@ function resolveMeme(token, items) {
     const it = items[Number(t) - 1];
     if (it) {
       const p = path.join(media.picsDir(), it.id);
-      if (fs.existsSync(p)) return p;
+      if (fs.existsSync(p)) {
+        media.notePicUsed(it.id); // 记一次使用，下次采样自然轮到别的
+        return p;
+      }
     }
     // 序号越界就往下试，也许模型写的就是文件名里的数字
   }
-  return memeFile(t);
+  const hit = media.findPicLoose(t);
+  if (!hit) return null;
+  media.notePicUsed(hit.id);
+  return hit.path;
 }
 
 // 对方明确要表情包/图片，或者明显在斗图——模型没挑图时兜底发一张
