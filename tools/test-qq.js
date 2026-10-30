@@ -188,7 +188,9 @@ async function main() {
           maxPerHour: 99,
           dedupeWindowSeconds: 60,
           batchWaitMs: 10,
-          voiceReply: false
+          voiceReply: false,
+          // 主动消息另有专门的用例（tools/test-proactive.js），这里关掉免得定时器插一条影响计数
+          proactive: { enabled: false }
         }
       });
 

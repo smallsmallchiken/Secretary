@@ -8,6 +8,7 @@ const { dbg } = require('../debug');
 const media = require('../media/library');
 const { dataDir } = require('../paths');
 const { OneBotClient } = require('./client');
+const proactive = require('./proactive');
 
 /**
  * QQ 自动回复（代替本人回复私聊消息）。
@@ -78,6 +79,19 @@ ${opts.voiceList.trim()}
 真人不会翻来覆去说一整句，想不出新的就只回一个字。
 `
       : '';
+  // 主动开口：不是回复，是你自己想说话。规矩和回复不完全一样，所以单独一段覆盖
+  const proactiveBlock = opts.proactive
+    ? `\n\n===== 这一次是你主动开口 =====
+对方没发消息，是你自己想找他说话。
+为什么现在开口：${opts.proactive.reasonText || '突然想起他'}
+怎么说：
+- 就一条，最多两条；一条别超过 12 个字，别写长句
+- 得有具体由头：上次聊到的事、现在这个点你在干嘛、手头正在弄的东西。别用「在吗」「干嘛呢」这种空话开头
+- 别解释你为什么突然说话，别提「好久没聊了」「有点想你」这类话
+- 说完就停，别自问自答，也别连着追问
+- 这次必须开口，没什么事也说一句，不要输出 [SKIP]
+`
+    : '';
   return `你在 QQ 上替「我」回消息。${personaLine}。这些字会直接发出去，对方不知道有第三者在写。
 
 硬规矩（按顺序照做）：
@@ -121,7 +135,7 @@ ${opts.voiceList.trim()}
 - 有多条消息一起给你时，要像真人攒着看完一起回，别逐条复述
 
 最后重申：你的性格是：${persona}。每句回复都要从这个性格出发。
-人设里的身份、作息、习惯要自然漏出来（问你干嘛 → 「刚睡醒」「画图呢」），但别主动自我介绍，也别每句都提。${recentBlock}${memeBlock}${voiceBlock}`;
+人设里的身份、作息、习惯要自然漏出来（问你干嘛 → 「刚睡醒」「画图呢」），但别主动自我介绍，也别每句都提。${proactiveBlock}${recentBlock}${memeBlock}${voiceBlock}`;
 }
 
 /** 群友要求改性格时的识别 + 人设演进提示词。
@@ -195,7 +209,9 @@ function defaultConfig() {
     // 群聊上下文喂给模型多少条
     memoryContext: 24,
     // 除了被 @ / 回复它自己 / 叫它的 QQ 昵称，消息里出现这些词也算在叫它
-    wakeWords: []
+    wakeWords: [],
+    // 主动发消息：不是等他说话，是自己找由头开口。策略在 proactive.js，这里只是默认开关
+    proactive: { ...proactive.DEFAULTS }
   };
 }
 
@@ -242,7 +258,27 @@ function saveState() {
 
 function chatState(qq) {
   const s = loadState();
-  return s.chats[qq] || (s.chats[qq] = { lastSentAt: 0, consecutive: 0, recentTexts: [], lastMsgId: 0, ctx: [] });
+  return (
+    s.chats[qq] ||
+    (s.chats[qq] = {
+      lastSentAt: 0,
+      consecutive: 0,
+      recentTexts: [],
+      lastMsgId: 0,
+      ctx: [],
+      // 主动消息要用的时间线：谁说最后一句、我有没有问句没被回、今天主动过几条
+      kind: '',
+      lastIncomingAt: 0,
+      lastOutgoingAt: 0,
+      awaitingReply: false,
+      lastProactiveAt: 0,
+      lastProactiveAttemptAt: 0,
+      proactiveUnanswered: 0,
+      proactiveDay: null,
+      slotFired: {},
+      randomRollAt: 0
+    })
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -383,6 +419,15 @@ function bubblesOf(text) {
     .split('||')
     .map((x) => x.trim())
     .filter(Boolean);
+}
+
+/** 我最后一句是不是在问他话——决定过一会儿要不要「追问」。
+ *  只看最后一个气泡：问号结尾，或者以疑问词收尾（「去哪」「你说啥」这种不带问号的）。 */
+const QUESTION_TAIL_RE = /([？?]|吗|呢|啥|咋|哪|谁|几点|多少)$/;
+function looksLikeQuestion(text) {
+  const bubbles = bubblesOf(text);
+  const last = bubbles[bubbles.length - 1] || '';
+  return QUESTION_TAIL_RE.test(last.replace(/[。.!！~～]+$/, ''));
 }
 
 /** 下载 URL 内容为 Buffer（带超时） */
@@ -775,11 +820,13 @@ async function start() {
   });
   config.set({ qq: { ...cfg, enabled: true } });
   client.start();
+  startProactiveTimer();
   dbg('[qq] 启动，白名单', cfg.whitelist.length, '人');
   return { ok: true };
 }
 
 function stop(silent = false) {
+  stopProactiveTimer();
   if (client) {
     client.stop();
     client = null;
@@ -892,6 +939,11 @@ async function onMessage(event) {
   const c = chatState(qq);
   if (event.message_id && c.lastMsgId === event.message_id) return;
   c.lastMsgId = event.message_id;
+  // 主动消息的时间线：对方开口了，说明之前那些「没回」的账一笔勾销
+  c.kind = isGroup ? 'group' : 'private';
+  c.lastIncomingAt = Date.now();
+  c.proactiveUnanswered = 0;
+  c.awaitingReply = false;
   saveState();
 
   // 解析消息内容：文字 + 图片/表情包 URL + 语音 URL + 经典表情含义
@@ -1187,6 +1239,11 @@ async function flushChat(qq) {
 
   guardRecord(getCfg(), qq, plain);
   const cs = chatState(qq);
+  // 主动消息的时间线：记下「我最后说了什么、是不是问句」，追问靠它判断
+  if (!isGroup) {
+    cs.lastOutgoingAt = Date.now();
+    cs.awaitingReply = looksLikeQuestion(plain);
+  }
   // 自己说过的话也进记忆，模型才知道刚才跟谁在说什么、有没有接过话
   if (isGroup) pushMemory(qq, '我', plain || '（表情包）', getCfg().memoryLimit);
   cs.sentMsgIds = [...(cs.sentMsgIds || []), ...sentIds].slice(-10);
@@ -1195,6 +1252,176 @@ async function flushChat(qq) {
 
   say(`已替你回复 ${name}${sentVoice ? '（语音）' : ''}${sentMeme ? '（带图）' : ''}：「${plain || '[表情包]'}」`);
   dbg('[qq] 已发送 ->', name, plain || '[表情包]');
+}
+
+/* ------------------------------------------------------------------ */
+/* 主动发消息（不是回复，是自己找由头开口）                              */
+/* ------------------------------------------------------------------ */
+
+const PROACTIVE_TICK_MS = 60 * 1000;
+// 生成/发送失败后别每 60 秒重试一次，模型白烧钱、日志也会刷屏
+const PROACTIVE_RETRY_MS = 10 * 60 * 1000;
+const REASON_LABEL = {
+  followUp: '接着上次问的',
+  timed: '到点打个招呼',
+  silence: '安静太久',
+  random: '突然想起他'
+};
+let proactiveTimer = null;
+
+function proactiveCfg() {
+  return { ...proactive.DEFAULTS, ...(getCfg().proactive || {}) };
+}
+
+/** 能主动找的人：私聊白名单；allFriends 时再加上打过交道的私聊。
+ *  群聊不主动（群里自顾自开口像刷屏，风险也大）。 */
+function proactiveTargets(cfg) {
+  const s = loadState();
+  const out = new Map();
+  for (const e of cfg.whitelist || []) {
+    if (e && e.qq) out.set(String(e.qq), e.name || String(e.qq));
+  }
+  if (cfg.allFriends) {
+    for (const [k, v] of Object.entries(s.chats || {})) {
+      if (v && v.kind === 'private' && !out.has(k)) out.set(k, k);
+    }
+  }
+  return out;
+}
+
+/** 生成一句主动要说的话。和回复共用同一套人设/表情清单，只是换了「为什么开口」 */
+async function generateProactiveText({ ctx, reasonText, cfg, p, now }) {
+  const llmCfg = config.getLLM();
+  if (!llmCfg || !llmCfg.enabled || !llmCfg.apiKey) return { text: null, memePath: null, error: '没有配置模型' };
+  const t = proactive.clockOf(now, p.tzOffsetMinutes || 0);
+  const picList = cfg.memes ? picPromptList() : { text: '', items: [] };
+  const recentSaid = ctx
+    .filter((x) => /^我[：:]/.test(x))
+    .map((x) => x.replace(/^我[：:]\s*/, '').trim())
+    .filter((x) => x && !x.includes('（'))
+    .slice(-4);
+  const user = [];
+  if (ctx.length) user.push(`最近的聊天记录：\n${ctx.join('\n')}`);
+  user.push(`现在是${t.dow} ${t.hhmm}。`);
+  user.push('请主动发一条消息。');
+  const msg = await llm.chat({
+    messages: [
+      {
+        role: 'system',
+        content: buildSystemPrompt(cfg.persona, picList.text, {
+          recentSaid,
+          proactive: { reasonText }
+        })
+      },
+      { role: 'user', content: user.join('\n\n') }
+    ],
+    config: llmCfg,
+    allowTools: false,
+    temperature: 1.0,
+    extra: { frequency_penalty: 0.5, presence_penalty: 0.35 }
+  });
+  const raw = String(msg.content || '');
+  const memeTag = raw.match(/\[图[:：]\s*([^\]\n]+?)\s*\]/);
+  const memePath = memeTag ? resolveMeme(memeTag[1], picList.items) : null;
+  if (memeTag && !memePath) dbg('[qq] 主动消息的配图标记没对上：', memeTag[1]);
+  return { text: cleanReply(raw), memePath, error: '' };
+}
+
+/** 真的发出去 + 记账（记账必须在发成功之后，发不出去不算数） */
+async function sendProactive(qq, due, now, name) {
+  const cfg = getCfg();
+  const p = proactiveCfg();
+  const cs = chatState(qq);
+  const ctx = (cs.ctx || []).slice(-CTX_PER_CHAT);
+  const gen = await generateProactiveText({ ctx, reasonText: due.reasonText, cfg, p, now });
+  if (!gen.text && !gen.memePath) {
+    dbg('[qq] 主动消息没生成出内容：', gen.error || '模型输出为空/被判 SKIP');
+    return null;
+  }
+  const bubbles = bubblesOf(gen.text).slice(0, 2);
+  const sentIds = [];
+  for (let i = 0; i < bubbles.length; i += 1) {
+    if (!client) throw new Error('连接已关闭');
+    const r = await client.sendPrivateText(qq, bubbles[i]);
+    if (r && r.message_id) sentIds.push(Number(r.message_id));
+    if (i < bubbles.length - 1) {
+      await new Promise((res) => setTimeout(res, 350 + Math.random() * 500));
+    }
+  }
+  if (gen.memePath && fs.existsSync(gen.memePath)) {
+    try {
+      const r = await client.sendSegments(false, qq, [
+        { type: 'image', data: { file: `file:///${gen.memePath.replace(/\\/g, '/')}` } }
+      ]);
+      if (r && r.message_id) sentIds.push(Number(r.message_id));
+    } catch (err) {
+      dbg('[qq] 主动消息配图发送失败：', err.message);
+    }
+  }
+  const plain = bubbles.join(' ') || '（表情包）';
+  const t = proactive.clockOf(now, p.tzOffsetMinutes || 0);
+  const before = proactive.dailyCount(cs, t.day);
+  cs.lastProactiveAt = now;
+  cs.lastOutgoingAt = now;
+  cs.awaitingReply = false;
+  cs.proactiveUnanswered = (cs.proactiveUnanswered || 0) + 1;
+  cs.proactiveDay = { day: t.day, n: before + 1 };
+  if (due.reason === 'timed' && due.slot) {
+    cs.slotFired = { ...(cs.slotFired || {}), [due.slot]: due.day || t.day };
+  }
+  cs.sentMsgIds = [...(cs.sentMsgIds || []), ...sentIds].slice(-10);
+  cs.ctx = [...ctx, `我：${plain}`].slice(-CTX_PER_CHAT);
+  saveState();
+  say(`主动找 ${name} 说了句：「${plain}」（${REASON_LABEL[due.reason] || due.reason}）`);
+  dbg('[qq] 主动消息 ->', name, plain, due.reason);
+  return plain;
+}
+
+/** 走一轮调度。抽出来是为了测试能直接喂假时间，不用等真的定时器 */
+async function proactiveTick(now = Date.now()) {
+  const p = proactiveCfg();
+  if (p.enabled === false) return [];
+  if (!client || !client.connected) return [];
+  const cfg = getCfg();
+  const done = [];
+  for (const [qq, name] of proactiveTargets(cfg)) {
+    const cs = chatState(qq);
+    if (now - (cs.lastProactiveAttemptAt || 0) < PROACTIVE_RETRY_MS) continue;
+    const due = proactive.dueReason({ chat: cs, cfg: p, now, key: qq });
+    if (!due) continue;
+    if (due.reason === 'random' && due.rolled === false) {
+      // 骰子掷了没中：记下来，一小时后再掷，不然 60 秒一跳等于必经中
+      cs.randomRollAt = now;
+      saveState();
+      continue;
+    }
+    cs.lastProactiveAttemptAt = now;
+    saveState();
+    try {
+      const text = await sendProactive(qq, due, now, name);
+      if (text) done.push({ qq, name, reason: due.reason, text });
+    } catch (err) {
+      dbg('[qq] 主动消息失败：', name, err.message);
+    }
+  }
+  return done;
+}
+
+function startProactiveTimer() {
+  stopProactiveTimer();
+  proactiveTimer = setInterval(() => {
+    proactiveTick().catch((err) => dbg('[qq] 主动消息调度异常：', err.message));
+  }, PROACTIVE_TICK_MS);
+  // 别让这个定时器拖住进程退出（Electron 退出、容器停服都要干脆）
+  if (proactiveTimer.unref) proactiveTimer.unref();
+  dbg('[qq] 主动消息调度已启动，每', PROACTIVE_TICK_MS / 1000, '秒一轮');
+}
+
+function stopProactiveTimer() {
+  if (proactiveTimer) {
+    clearInterval(proactiveTimer);
+    proactiveTimer = null;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1211,6 +1438,7 @@ function init(notifierFn) {
 }
 
 function shutdown() {
+  stopProactiveTimer();
   for (const [, pend] of pendingChats) {
     if (pend.timer) clearTimeout(pend.timer);
   }
@@ -1230,5 +1458,5 @@ module.exports = {
   shutdown,
   setNotifier,
   // 内部函数导出仅供测试
-  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, bubblesOf, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile, setTtsImpl, generateReply, LONG_VOICE_RE, VOICE_REQ_RE, VOICE_SAY_MAX }
+  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, bubblesOf, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile, setTtsImpl, generateReply, LONG_VOICE_RE, VOICE_REQ_RE, VOICE_SAY_MAX, looksLikeQuestion, proactiveCfg, proactiveTargets, proactiveTick, sendProactive, startProactiveTimer, stopProactiveTimer, proactive }
 };

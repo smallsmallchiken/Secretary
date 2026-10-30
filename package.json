@@ -9,7 +9,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "test": "node tools/test-agent.js --check && node tools/test-wander.js && node tools/test-pet-anim.js && node tools/test-pet-ui.js && node tools/test-windows.js && node tools/test-qq.js && node tools/test-wx.js",
+    "test": "node tools/test-agent.js --check && node tools/test-wander.js && node tools/test-pet-anim.js && node tools/test-pet-ui.js && node tools/test-windows.js && node tools/test-qq.js && node tools/test-proactive.js && node tools/test-wx.js",
     "test:py": "wechat-bot\\py312\\python.exe wechat-bot\\test_db_flow.py && wechat-bot\\py312\\python.exe wechat-bot\\test_guard.py && wechat-bot\\py312\\python.exe wecom-bot\\test_crypto.py && wechat-bot\\py312\\python.exe wecom-bot\\test_message.py"
   },
   "devDependencies": {
