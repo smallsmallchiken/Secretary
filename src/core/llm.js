@@ -1,6 +1,14 @@
 'use strict';
 
-const tools = require('./tools');
+// 工具层（开应用 / 剪贴板 / 截图…）全部依赖 electron 的 API，纯 Node 环境下
+// require 就会 MODULE_NOT_FOUND。**服务器上的 QQ 值守就是纯 Node**（不需要任何
+// 本地工具），所以这里容错加载：拿不到就当没有工具，只做普通对话。
+let tools = null;
+try {
+  tools = require('./tools');
+} catch (err) {
+  tools = null;
+}
 
 /**
  * OpenAI 兼容接口客户端（DeepSeek / OpenAI / 通义 / Kimi / 本地 Ollama 都能用）。
@@ -18,7 +26,7 @@ async function chat({ messages, config, temperature = 0.3, allowTools = true }) 
     messages,
     temperature
   };
-  if (allowTools) {
+  if (allowTools && tools) {
     body.tools = tools.toOpenAITools();
     body.tool_choice = 'auto';
   }

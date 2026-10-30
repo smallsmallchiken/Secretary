@@ -52,13 +52,18 @@ class OneBotClient {
     }
     this.pending.clear();
     if (this.ws) {
+      const ws = this.ws;
+      this.ws = null;
       try {
-        this.ws.removeAllListeners();
-        this.ws.close();
+        ws.removeAllListeners();
+        // ws 在 CONNECTING 状态下被关掉会**异步 emit 'error'**（"WebSocket was closed
+        // before the connection was established"）。监听器已经被移除，没人接就变成
+        // unhandled 'error' 直接把进程干掉 —— 服务器上的值守入口第一次 stop 就这么崩过。
+        ws.on('error', () => {});
+        ws.terminate();
       } catch {
         /* ignore */
       }
-      this.ws = null;
     }
     this.selfId = null;
     this.onStatus('stopped');
