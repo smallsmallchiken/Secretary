@@ -50,13 +50,14 @@ ${memeList.trim()}
       : '';
   const voiceBlock =
     opts.voiceList && opts.voiceList.trim()
-      ? `\n\n手头有几条现成的语音可以随回复发出去（我的声音），格式是 [语音:内容]：
+      ? `\n\n你可以发语音（用我的声音）。下面这些是现成的，写了立刻就能发：
 ${opts.voiceList.trim()}
 
 语音规矩：
-- 对方发了语音、或者那句话特别适合出声（撒娇、嫌弃、偷笑）时，从清单里挑最贴的一条，写成 [语音:内容] 放在回复最末尾
+- 对方发了语音、或者这句话特别适合出声（撒娇、嫌弃、偷笑）时，把要念的那句写成 [语音:内容] 放在回复最末尾
+- 内容不限于上面清单：想说的话清单里没有，也照样写 [语音:想说的那句话]，会当场录一条（慢一两秒，但能发）
 - 也可以只发语音不说话（整条回复就写 [语音:内容]）
-- 大多数时候还是打字；一次最多一条；只能从清单里挑，清单外的语音你发不了`
+- 大多数时候还是打字；一次最多一条；要念的别超过三四十个字，太长了听着累`
       : '';
   const groupBlock = isGroup
     ? `\n\n你现在在一个群里。看群聊记录时注意：
@@ -420,6 +421,8 @@ const LONG_VOICE_RE =
   /长(?:一点|点|一些)?的?(?:语音|话|说)|说长(?:一点|点|些)?|多说(?:几|两|三)句|语音(?:太|好)短|整段(?:说|念)|来(?:段|点)长的/;
 // 单纯要语音（不限长短）
 const VOICE_REQ_RE = /发(?:条|个)?语音|语音回|用语音|语音说|语音呢|说句话听听/;
+// 现场合成（模型自己挑的、预置里没有的话）最多念这么长，再长就直接发文字
+const VOICE_SAY_MAX = 60;
 
 // 对方明确要表情包/图片，或者明显在斗图——模型没挑图时兜底发一张
 const PIC_WANT_RE =
@@ -632,10 +635,23 @@ async function generateReply({ history, incoming, imageUri, cfg, isGroup, addres
       dbg('[qq] 对方要图、模型没挑，随机兜底：', path.basename(fallback.path));
     }
   }
-  // 拆出预置语音标记：[语音:晚安] → 共享语音池里的现成 mp3
-  const voiceTag = raw.match(/\[语音[:：]\s*([^\]]+)\]/);
-  const voicePath = voiceTag ? media.findPreset(voiceTag[1].trim()) : null;
-  return [cleanReply(raw), memePath, '', voicePath ? voicePath.path : null];
+  // 拆出语音标记：[语音:晚安]
+  // - 命中预置 → 直接用现成 mp3（零延迟零花费）
+  // - 没命中 → 把这句话原样带回去，由发送端现场合成（这就是「其他的现场合成」）
+  const voiceTag = raw.match(/\[语音[:：]\s*([^\]\n]+?)\s*\]/);
+  let voicePath = null;
+  let voiceSay = null;
+  if (voiceTag) {
+    const want = voiceTag[1].trim();
+    const hit = media.findPreset(want);
+    if (hit) {
+      voicePath = hit.path;
+    } else if (want) {
+      voiceSay = want; // 待现场合成
+      dbg('[qq] 语音不在预置里，待现场合成：', want.slice(0, 24));
+    }
+  }
+  return [cleanReply(raw), memePath, '', voicePath, voiceSay];
 }
 
 /* ------------------------------------------------------------------ */
@@ -1001,8 +1017,9 @@ async function flushChat(qq) {
   let reply = null;
   let memePath = null;
   let presetVoice = null;
+  let voiceSay = null; // 模型点名要念、但预置里没有的那句话 → 现场合成
   try {
-    const [gen, meme, err, vp] = await generateReply({
+    const [gen, meme, err, vp, vs] = await generateReply({
       history,
       incoming,
       imageUri,
@@ -1010,13 +1027,14 @@ async function flushChat(qq) {
       isGroup,
       addressed: items.some((i) => i.addressed)
     });
-    if (!gen && !meme && !vp) {
+    if (!gen && !meme && !vp && !vs) {
       dbg('[qq]', name, '这次不接话：', err || '模型判断跟他没关系/输出为空');
       return;
     }
     reply = gen;
     memePath = meme && fs.existsSync(meme) ? meme : null;
     presetVoice = vp && fs.existsSync(vp) ? vp : null;
+    voiceSay = vs || null;
   } catch (err) {
     dbg('[qq]', name, '生成失败：', err.message);
     return;
@@ -1027,29 +1045,43 @@ async function flushChat(qq) {
     return;
   }
 
-  // 发语音的条件：对方发了语音 / 明确要语音 / 模型主动挑了预置语音 / 配置 voiceAlways。失败退回文字
+  // 发语音的条件：对方发了语音 / 明确要语音 / 模型挑了语音（预置或现场合成）/ voiceAlways。失败退回文字
   const wantLong = LONG_VOICE_RE.test(incoming);
   const voiceReq = VOICE_REQ_RE.test(incoming) || wantLong;
-  const wantVoice = !!getCfg().voiceReply && !!(presetVoice || voiceUrl || getCfg().voiceAlways || voiceReq);
+  const wantVoice =
+    !!getCfg().voiceReply &&
+    !!(presetVoice || voiceSay || voiceUrl || getCfg().voiceAlways || voiceReq);
   // 预置片段全是短句：对方要「长一点的语音」、而且这次确实有够长的话可念，
   // 才跳过预置现场合成；否则（模型只吐了个预置标记）还是用预置，别一句都发不出来
   const longEnough = wantLong && String(reply || '').trim().length >= 8;
   const usePreset = longEnough ? null : presetVoice;
+  // 要念的内容：长语音念整段正文；模型点名了清单外的话就念那句；否则念回复本身
+  let sayText = longEnough ? reply : voiceSay || reply;
+  // 现场合成要现等（几十字 5-15 秒），太长就退回文字，别让人干等。
+  // 用户明确要长语音（longEnough）时不受这个限制，那是他自己要的。
+  if (!usePreset && !longEnough && String(sayText || '').trim().length > VOICE_SAY_MAX) {
+    dbg('[qq] 现场合成文本过长（%d 字），这次只发文字', String(sayText).trim().length);
+    if (!reply) reply = String(sayText).trim(); // 不念了，但话得送到
+    sayText = null;
+  }
   const sentIds = []; // 这次发出去的消息 id，别人引用回复时能认出「这是说我」
   let sentVoice = false;
-  if (client && wantVoice && (reply || usePreset)) {
+  if (client && wantVoice && (sayText || usePreset)) {
     try {
-      const file = usePreset || (await ttsImpl(reply, getCfg()));
+      const file = usePreset || (await ttsImpl(sayText, getCfg()));
       const r = await client.sendRecord(isGroup, targetId, file);
       if (r && r.message_id) sentIds.push(Number(r.message_id));
       sentVoice = true;
       dbg(
         '[qq] 已发送语音 ->',
         name,
-        usePreset ? '(预置) ' + path.basename(usePreset) : `(现场合成 ${String(reply || '').length} 字)`
+        usePreset
+          ? '(预置) ' + path.basename(usePreset)
+          : `(现场合成 ${String(sayText || '').length} 字)`
       );
     } catch (err) {
       dbg('[qq]', name, '语音发送失败，退回文字：', err.message);
+      if (!reply && sayText) reply = String(sayText); // 语音没发出去，至少把话送到
     }
   }
 
@@ -1070,6 +1102,10 @@ async function flushChat(qq) {
   }
 
   if (!sentVoice && !sentMeme) {
+    if (!reply) {
+      dbg('[qq]', name, '没有可发的内容（语音没发出去、正文也空），放弃');
+      return;
+    }
     try {
       if (!client) throw new Error('连接已关闭');
       const r = await (isGroup

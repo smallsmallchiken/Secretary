@@ -412,6 +412,51 @@ async function main() {
         shortSent && shortSent.params.message.some((s) => s.type === 'record'),
         shortSent && JSON.stringify(shortSent.params.message)
       );
+      // 用例：模型想说的话不在预置里 → 现场合成那句，而不是把语音标记悄悄丢掉
+      const beforeCustom = ttsCalls.length;
+      llmStub.behavior = () => '[语音:今天风好大啊]';
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'private', sub_type: 'friend',
+        user_id: 10001, message_id: 502, message: [{ type: 'text', data: { text: '随便说点什么' } }]
+      });
+      const customSent = received.filter((r) => r.action === 'send_private_msg').pop();
+      check('清单外语音也现场合成', ttsCalls.length === beforeCustom + 1, `tts 调用 ${ttsCalls.length - beforeCustom} 次`);
+      check('合成的是模型写的那句', ttsCalls[beforeCustom] === '今天风好大啊', String(ttsCalls[beforeCustom]));
+      check(
+        '清单外语音发出 record 段',
+        customSent && customSent.params.message.some((s) => s.type === 'record'),
+        customSent && JSON.stringify(customSent.params.message)
+      );
+
+      // 用例：只差标点的说法应该复用预置（「好的！」= 预置「好的」），不该再花一次合成
+      const goodPath = mediaLib.putVoice(Buffer.from('ID3-preset-hao'), {
+        text: '好的', kind: 'preset', voice: 'test', model: 'test'
+      });
+      check('再造一条预置「好的」', !!goodPath);
+      const beforePunct = ttsCalls.length;
+      llmStub.behavior = () => '[语音:好的！]';
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'private', sub_type: 'friend',
+        user_id: 10001, message_id: 503, message: [{ type: 'text', data: { text: '发个语音' } }]
+      });
+      check('带标点也能命中预置', ttsCalls.length === beforePunct, `多调了 ${ttsCalls.length - beforePunct} 次`);
+
+      // 用例：清单外的话太长（>60 字）就不合成，退化成文字，别让人干等
+      const longSay = '这句话实在太长了'.repeat(10);
+      const beforeTooLong = ttsCalls.length;
+      llmStub.behavior = () => `[语音:${longSay}]`;
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'private', sub_type: 'friend',
+        user_id: 10001, message_id: 504, message: [{ type: 'text', data: { text: '随便说点什么' } }]
+      });
+      const tooLongSent = received.filter((r) => r.action === 'send_private_msg').pop();
+      check('超长现场合成不调 TTS', ttsCalls.length === beforeTooLong, `多调了 ${ttsCalls.length - beforeTooLong} 次`);
+      check(
+        '超长时退化成文字发出去',
+        tooLongSent && tooLongSent.params.message.some((s) => s.type === 'text' && s.data.text.includes('这句话实在太长')),
+        tooLongSent && JSON.stringify(tooLongSent.params.message).slice(0, 120)
+      );
+
       _internals.setTtsImpl(null);
       llmStub.behavior = origBehavior;
 

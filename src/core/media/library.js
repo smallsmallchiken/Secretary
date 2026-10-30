@@ -406,15 +406,36 @@ function voiceHash(text, voice, model) {
 }
 
 /**
- * 找现成音频。优先级：人工预置片段 > 同文本的合成缓存。
+ * 语音文本的"同一个意思"归一化：去空白、去标点、全角转半角、英文小写。
+ * 模型写「好的！」或者「好的~」，本质就是预置里那条「好的」，没必要为标点再合成一遍。
+ */
+function normSay(text) {
+  return String(text || '')
+    .replace(/[\s\u3000]/g, '')
+    .replace(
+      /[，。！？、；：""''（）【】《》〈〉「」『』…—～~,.!?;:"'()\[\]{}<>·]/g,
+      ''
+    )
+    .toLowerCase();
+}
+
+/**
+ * 找现成音频。优先级：预置片段 > 同文本的合成缓存（含"只差标点"的命中）。
  * @returns 文件绝对路径，没有就 null
  */
 function findVoice(text, voice, model) {
   const clean = String(text || '').trim();
   if (!clean) return null;
   const idx = loadIndex();
-  const hit = idx.voice.find((x) => x.text === clean && x.kind === 'preset');
-  if (hit && voiceFileExists(hit.id)) return path.join(voiceDir(), hit.id);
+  let hit = idx.voice.find((x) => x.text === clean && x.kind === 'preset');
+  if (!hit) {
+    const n = normSay(clean);
+    if (n) hit = idx.voice.find((x) => x.kind === 'preset' && normSay(x.text) === n);
+  }
+  if (hit && voiceFileExists(hit.id)) {
+    noteVoiceUsed(hit.id);
+    return path.join(voiceDir(), hit.id);
+  }
   const key = voiceHash(clean, voice, model);
   const tts = idx.voice.find((x) => x.hash === key);
   if (tts && voiceFileExists(tts.id)) {
@@ -436,16 +457,33 @@ function voiceById(id) {
   }
 }
 
-/** 按文字找预置片段：先精确，再包含（模型多半会多带一两个字） */
+/**
+ * 按文字找预置片段。三步：原样 → 去标点空白 → 长度接近的互相包含。
+ * 模型写「好的！」「晚安呀」这种擦边说法也算命中，省一次现场合成。
+ */
 function findPreset(text) {
   const clean = String(text || '').trim();
   if (!clean) return null;
   const idx = loadIndex();
   const presets = idx.voice.filter((x) => x.kind === 'preset' && voiceFileExists(x.id));
+  const hit = (x) => ({ ...x, path: path.join(voiceDir(), x.id) });
+
   const exact = presets.find((x) => x.text === clean);
-  if (exact) return { ...exact, path: path.join(voiceDir(), exact.id) };
-  const loose = presets.find((x) => x.text.includes(clean) || clean.includes(x.text));
-  return loose ? { ...loose, path: path.join(voiceDir(), loose.id) } : null;
+  if (exact) return hit(exact);
+
+  const n = normSay(clean);
+  if (!n) return null;
+  const same = presets.find((x) => normSay(x.text) === n);
+  if (same) return hit(same);
+
+  // 只认长度接近的，且至少两个字：「好的呀」→「好的」可以，
+  // 「好」→「好耶」不行（差一个字意思就变了，宁可现场合成）
+  if (n.length < 2) return null;
+  const loose = presets.find((x) => {
+    const t = normSay(x.text);
+    return t && (t.includes(n) || n.includes(t)) && Math.abs(t.length - n.length) <= 3;
+  });
+  return loose ? hit(loose) : null;
 }
 
 function listPresets() {
@@ -625,9 +663,17 @@ function picListTextBalanced(opts = {}) {
 }
 
 /** 提示词里给模型看的预置语音清单：[语音:文字] */
-function presetListText(max = 20) {
+/**
+ * 给提示词用的预置清单。排序：用得多的优先 → 短的优先（短句更常被念）。
+ * 清单外的句子也能发（现场合成），所以这里不需要把池子全塞进去。
+ */
+function presetListText(max = 50) {
   const list = listPresets()
-    .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
+    .sort((a, b) => {
+      const u = (b.uses || 0) - (a.uses || 0);
+      if (u) return u;
+      return String(a.text || '').length - String(b.text || '').length;
+    })
     .slice(0, max);
   return list.map((x) => `[语音:${x.text}]`).join('、');
 }
@@ -662,6 +708,7 @@ module.exports = {
   syncFromDisk,
   migrateLegacy,
   voiceHash,
+  normSay,
   findVoice,
   voiceById,
   findPreset,
