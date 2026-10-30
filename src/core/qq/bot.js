@@ -258,9 +258,8 @@ function saveState() {
 
 function chatState(qq) {
   const s = loadState();
-  return (
-    s.chats[qq] ||
-    (s.chats[qq] = {
+  if (!s.chats[qq]) {
+    s.chats[qq] = {
       lastSentAt: 0,
       consecutive: 0,
       recentTexts: [],
@@ -277,8 +276,16 @@ function chatState(qq) {
       proactiveDay: null,
       slotFired: {},
       randomRollAt: 0
-    })
-  );
+    };
+  }
+  const c = s.chats[qq];
+  // 升级前就存在的会话没有时间线字段。用「上次回他的时间」倒推对话结束时间，
+  // 否则老会话永远满足不了「必须聊过才主动」——上线后要好几天才开始工作。
+  if (!c.lastIncomingAt && c.lastSentAt && (c.ctx || []).length) {
+    c.lastIncomingAt = c.lastSentAt;
+    c.lastOutgoingAt = c.lastSentAt;
+  }
+  return c;
 }
 
 /* ------------------------------------------------------------------ */
