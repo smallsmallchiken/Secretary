@@ -66,27 +66,47 @@ ${opts.voiceList.trim()}
 - 群友之间互相对聊、没你什么事的时候，别插嘴，直接输出 [SKIP]
 - 只有被 @、被点名、别人接你的话、或明确在问你意见时才开口；开口就随便说一句，别像总结发言，也别一口气回复好几个人`
     : '';
-  return `你在 QQ 上替「我」回消息。${personaLine}。对方不知道背后是谁，每句都要像本人随手敲的。
+  const recentBlock =
+    opts.recentSaid && opts.recentSaid.length
+      ? `\n\n你刚回过这几句：${opts.recentSaid.map((x) => `「${x}」`).join('、')}
+这一轮不能再说一样的话——同样的句子、同样的开头、同一个口头禅、同一个反问都不行。
+真人不会翻来覆去说一句，想不出新的就只回一个字。
+`
+      : '';
+  return `你在 QQ 上替「我」回消息。${personaLine}。这些字会直接发出去，对方不知道有第三者在写。
 
-硬规矩只有三条：
-1. 只输出要发的那句话：不要旁白、括号动作、引号、前缀，emoji 最多一个
-2. 一两句话完事，长短参差，有时一两个字也是正经回复
-3. 广告、诈骗、群发、别人在聊跟你无关的事 → 输出 [SKIP]${groupBlock}
+硬规矩（按顺序照做）：
+1. 只输出要发的话。不要旁白、括号动作、引号、用户名前缀，emoji 最多一个
+2. 短。一条 2~12 个字最常见；每四五条里要有那么一条只有一两个字（「行」「？」「哦」「6」「没了」）
+3. 想说的不止一个意思，就分条发，用 || 隔开，最多三条。不要把三个意思塞进一条长句
+   比如：行吧||那你自己看着办
+4. 广告、诈骗、群发、跟你无关的群聊 → 输出 [SKIP]${groupBlock}
+
+最容易被抓的三件事（写完自己扫一眼，中招就重写）：
+- 太完整：每条都写成「接话 + 反驳 + 结论」三段。真人往往只说头一句就完了
+- 太机智：每条都有漂亮的反击，像脱口秀。真人多数时候懒得想，回个「哦」就过去了
+- 太整齐：连着几条长度一样、套路一样。真人忽长忽短，偶尔还答非所问
 
 说话全靠找下面这些例子的感觉（✗ 是假人腔禁止；✓ 才是对的）：
-「在吗」→ ✓「说」/「又咋了」/「在啊咋」 ✗「我在的，请问有什么事吗」
-「今天好累啊」→ ✓「谁把你累成这样了」/「活该 谁让你浪的」 ✗「辛苦啦，早点休息哦」
+「在吗」→ ✓「说」/「？」 ✗「我在的，请问有什么事吗」
+「今天好累啊」→ ✓「哦」/「谁整的」 ✗「辛苦啦，早点休息哦」
 「你是不是机器人」→ ✓「草 你才是机器」/「机器人会骂人不」 ✗「哈哈你怎么会这么想」
 「周末出来玩吗」→ ✓「行 正好闲得蛋疼」/「去哪 不去 想躺着」 ✗「好呀，周末哪天？想去哪儿玩？」
 「今天吃了顿火锅超爽」→ ✓「卧槽不带我？」/「呵呵 独食怪」 ✗「听着就爽！下次带上我一起冲～」
 （发了个「哈哈大笑」表情）→ ✓「笑屁啊」「笑什么 笑」 ✗「哈哈哈哈，看到你笑我也很开心」
 「你是女孩子吗」→ ✓「问这么干嘛」「是啊咋 你想挨打？」 ✗「是呀，怎么突然问这个」
 「帮我看看这个」+图 → ✓「哦 就这？」「看不懂 你发的什么玩意」 ✗「好的，我帮你看一下」
+「我跟你说个事…（长篇）」→ ✓「讲」「你倒是说啊」 ✗「好的，你说吧，我在听」
+对方连发三条 → ✓ 只回最后一条 /「你打字真快」 ✗ 一条条挨个回
 （群友 A 问 B：你昨天几点睡的；B 回：两点）→ ✓「[SKIP]」 ✗「两点也太晚了吧，注意身体」
 （群友互相约饭，没叫你）→ ✓「[SKIP]」 ✗「我也想去」
 
-书面语、客服腔（请问/有什么可以帮到你）、心理咨询腔（我理解你的感受）、关怀模板（辛苦了/多喝热水/早点休息/别太勉强）、总结升华（愿你/加油哦/相信你可以）——出现就重写。
-全程温温柔柔没有情绪起伏也算失败：要么损、要么不耐烦、要么兴奋，得有态度。
+下面这些腔调出现一次就重写：
+书面语（确实/诚然/不妨/颇为/此外/值得一提）、客服腔（请问/有什么可以帮到你/已收到）、心理咨询腔（我理解你的感受/听起来你/这很正常）、关怀模板（辛苦了/多喝热水/早点休息/别太勉强）、总结升华（愿你/加油哦/相信你可以/希望你）、塑料结尾（那就这么说定啦/期待和你/嘿嘿）。
+
+还有两条：
+- 别复读自己：同一个口头禅、同一个反问、同样的句式，一场对话里最多用一次
+- 全程温温柔柔没有情绪起伏也算失败：要么损、要么不耐烦、要么兴奋，得有态度
 
 其他情况的处理：
 - 图片/表情包以（附图：…）（发了个「xx」表情）标注在消息里，照常接话
@@ -95,7 +115,7 @@ ${opts.voiceList.trim()}
 - 群里被人叫到就随口应一句，别正式，别主动喊人，别当复读机
 - 有多条消息一起给你时，要像真人攒着看完一起回，别逐条复述
 
-最后重申：你的性格是：${persona}。每句回复都要从这个性格出发。${memeBlock}${voiceBlock}`;
+最后重申：你的性格是：${persona}。每句回复都要从这个性格出发。${recentBlock}${memeBlock}${voiceBlock}`;
 }
 
 /** 群友要求改性格时的识别 + 人设演进提示词。
@@ -110,6 +130,10 @@ const PERSONA_DETECT_PROMPT = `你是 QQ 群机器人的性格管理员。输入
 3) 不算 → {"change": false, "persona": ""}`;
 
 const REPLY_MAX_CHARS = 120;
+// 分条：真人很少一条消息说二十多个字，多是两三条短的。模型用 || 分隔。
+const BUBBLE_MAX = 3; // 一次最多三条，多了像刷屏
+const BUBBLE_MAX_CHARS = 60; // 单条上限（长语音场景底下另有放宽）
+const BUBBLE_GAP_MS = [350, 900]; // 两条之间的间隔，模拟打字的停顿
 const CTX_PER_CHAT = 6; // 每会话保留的上下文条数（一问一答算两条）
 const MEMORY_LIMIT_DEFAULT = 120; // 每个群保留的聊天记录条数
 const MEMORY_CONTEXT_DEFAULT = 24; // 每次喂给模型多少条群聊记录
@@ -336,8 +360,23 @@ function cleanReply(text) {
   for (const pre of CLEAN_PREFIX) {
     if (t.startsWith(pre)) t = t.slice(pre.length);
   }
-  t = t.trim().split('\n')[0].slice(0, REPLY_MAX_CHARS).trim();
-  return t || null;
+  // 换行一律压成空格（模型爱排版），分条只认 ||：真人连发两三条短消息，比一条长句像人
+  t = t.replace(/\r?\n+/g, ' ').trim();
+  const parts = t
+    .split('||')
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .slice(0, BUBBLE_MAX)
+    .map((x) => x.slice(0, BUBBLE_MAX_CHARS).trim());
+  return parts.join('||') || null;
+}
+
+/** 清洗后的回复切成气泡数组（发消息用） */
+function bubblesOf(text) {
+  return String(text || '')
+    .split('||')
+    .map((x) => x.trim())
+    .filter(Boolean);
 }
 
 /** 下载 URL 内容为 Buffer（带超时） */
@@ -562,7 +601,7 @@ function setTtsImpl(fn) {
   ttsImpl = fn || ttsToFile;
 }
 
-async function generateReply({ history, incoming, imageUri, cfg, isGroup, addressed }) {
+async function generateReply({ history, incoming, imageUri, cfg, isGroup, addressed, recentSaid }) {
   const llmCfg = config.getLLM();
   if (!llmCfg || !llmCfg.enabled || !llmCfg.apiKey) {
     return [null, null, '没有配置模型，无法自动生成回复'];
@@ -601,7 +640,8 @@ async function generateReply({ history, incoming, imageUri, cfg, isGroup, addres
         role: 'system',
         content: buildSystemPrompt(cfg.persona, picList.text, {
           isGroup,
-          voiceList: cfg.voiceReply ? media.presetListText() : ''
+          voiceList: cfg.voiceReply ? media.presetListText() : '',
+          recentSaid
         })
       },
       {
@@ -617,7 +657,9 @@ async function generateReply({ history, incoming, imageUri, cfg, isGroup, addres
     ],
     config: imageUri ? { ...llmCfg, model: cfg.visionModel || VISION_MODEL_DEFAULT } : llmCfg,
     allowTools: false,
-    temperature: 1.0 // 高一点更活，太正经就往上加
+    temperature: 1.0, // 高一点更活，太正经就往上加
+    // 频率/存在惩罚专治口头禅复读：真实样本里连续三条都在说「别得寸进尺」「凶什么凶」
+    extra: { frequency_penalty: 0.5, presence_penalty: 0.35 }
   });
   // 拆出配图标记：[图:序号]（也认文件名/用途描述），其余走正常清洗
   const raw = String(msg.content || '');
@@ -1014,6 +1056,12 @@ async function flushChat(qq) {
   const ctx = (chatState(qq).ctx || []).slice(-CTX_PER_CHAT);
   // 群聊用整段记忆当上下文（里面已经包含刚发的这几条），私聊用短 ctx
   const history = isGroup ? memoryText(qq, cfg.memoryContext) : ctx;
+  // 自己最近说过的原话：频率惩罚管不到跨请求的复读，只能点名禁掉
+  const recentSaid = ctx
+    .filter((x) => /^我[：:]/.test(x))
+    .map((x) => x.replace(/^我[：:]\s*/, '').trim())
+    .filter((x) => x && !x.includes('（'))
+    .slice(-4);
   let reply = null;
   let memePath = null;
   let presetVoice = null;
@@ -1025,7 +1073,8 @@ async function flushChat(qq) {
       imageUri,
       cfg: getCfg(),
       isGroup,
-      addressed: items.some((i) => i.addressed)
+      addressed: items.some((i) => i.addressed),
+      recentSaid
     });
     if (!gen && !meme && !vp && !vs) {
       dbg('[qq]', name, '这次不接话：', err || '模型判断跟他没关系/输出为空');
@@ -1040,7 +1089,7 @@ async function flushChat(qq) {
     return;
   }
 
-  if (reply && isDuplicate(getCfg(), qq, reply)) {
+  if (reply && isDuplicate(getCfg(), qq, reply.replace(/\|\|/g, ' '))) {
     dbg('[qq]', name, '回复与最近重复，放弃本次');
     return;
   }
@@ -1086,11 +1135,13 @@ async function flushChat(qq) {
   }
 
   // 配图：模型挑了表情包就发（文字和图拼一条消息；语音场景图单独发）
+  const bubbles = bubblesOf(reply);
+  const plain = bubbles.join(' '); // 记忆/去重/护栏用合并文本
   let sentMeme = false;
   if (client && memePath) {
     try {
       const segs = [];
-      if (reply && !sentVoice) segs.push({ type: 'text', data: { text: reply } });
+      if (plain && !sentVoice) segs.push({ type: 'text', data: { text: plain } });
       segs.push({ type: 'image', data: { file: `file:///${memePath.replace(/\\/g, '/')}` } });
       const r = await client.sendSegments(isGroup, targetId, segs);
       if (r && r.message_id) sentIds.push(Number(r.message_id));
@@ -1102,33 +1153,42 @@ async function flushChat(qq) {
   }
 
   if (!sentVoice && !sentMeme) {
-    if (!reply) {
+    if (!bubbles.length) {
       dbg('[qq]', name, '没有可发的内容（语音没发出去、正文也空），放弃');
       return;
     }
-    try {
-      if (!client) throw new Error('连接已关闭');
-      const r = await (isGroup
-        ? client.sendGroupText(targetId, reply)
-        : client.sendPrivateText(targetId, reply));
-      if (r && r.message_id) sentIds.push(Number(r.message_id));
-    } catch (err) {
-      dbg('[qq]', name, '发送失败：', err.message);
-      say(`QQ 回复 ${name} 发送失败：${err.message}`);
-      return;
+    // 分条发：每条之间停一下，像人打完一条再打一条
+    for (let i = 0; i < bubbles.length; i += 1) {
+      try {
+        if (!client) throw new Error('连接已关闭');
+        const r = await (isGroup
+          ? client.sendGroupText(targetId, bubbles[i])
+          : client.sendPrivateText(targetId, bubbles[i]));
+        if (r && r.message_id) sentIds.push(Number(r.message_id));
+      } catch (err) {
+        dbg('[qq]', name, '发送失败：', err.message);
+        say(`QQ 回复 ${name} 发送失败：${err.message}`);
+        return;
+      }
+      // 两条之间停一下，像人打完一句再打下一句
+      if (i < bubbles.length - 1) {
+        const gap = BUBBLE_GAP_MS[0] + Math.random() * (BUBBLE_GAP_MS[1] - BUBBLE_GAP_MS[0]);
+        await new Promise((r) => setTimeout(r, gap));
+      }
     }
+    if (bubbles.length > 1) dbg('[qq] 分 %d 条发送 ->', bubbles.length, name);
   }
 
-  guardRecord(getCfg(), qq, reply || '');
+  guardRecord(getCfg(), qq, plain);
   const cs = chatState(qq);
   // 自己说过的话也进记忆，模型才知道刚才跟谁在说什么、有没有接过话
-  if (isGroup) pushMemory(qq, '我', reply || '（表情包）', getCfg().memoryLimit);
+  if (isGroup) pushMemory(qq, '我', plain || '（表情包）', getCfg().memoryLimit);
   cs.sentMsgIds = [...(cs.sentMsgIds || []), ...sentIds].slice(-10);
-  cs.ctx = [...ctx, `对方：${incoming.replace(/\n/g, '；')}`, `我：${reply || '（发了个表情包）'}`].slice(-CTX_PER_CHAT);
+  cs.ctx = [...ctx, `对方：${incoming.replace(/\n/g, '；')}`, `我：${plain || '（发了个表情包）'}`].slice(-CTX_PER_CHAT);
   saveState();
 
-  say(`已替你回复 ${name}${sentVoice ? '（语音）' : ''}${sentMeme ? '（带图）' : ''}：「${reply || '[表情包]'}」`);
-  dbg('[qq] 已发送 ->', name, reply || '[表情包]');
+  say(`已替你回复 ${name}${sentVoice ? '（语音）' : ''}${sentMeme ? '（带图）' : ''}：「${plain || '[表情包]'}」`);
+  dbg('[qq] 已发送 ->', name, plain || '[表情包]');
 }
 
 /* ------------------------------------------------------------------ */
@@ -1164,5 +1224,5 @@ module.exports = {
   shutdown,
   setNotifier,
   // 内部函数导出仅供测试
-  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile, setTtsImpl, generateReply, LONG_VOICE_RE, VOICE_REQ_RE, VOICE_SAY_MAX }
+  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, bubblesOf, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile, setTtsImpl, generateReply, LONG_VOICE_RE, VOICE_REQ_RE, VOICE_SAY_MAX }
 };

@@ -17,7 +17,7 @@ try {
  * 系统提示词不在这里——由 `persona.js` 按用户配置的性格和格式要求生成。
  */
 
-async function chat({ messages, config, temperature = 0.3, allowTools = true }) {
+async function chat({ messages, config, temperature = 0.3, allowTools = true, extra = null }) {
   const baseUrl = (config.baseUrl || 'https://api.deepseek.com').replace(/\/+$/, '');
   const url = baseUrl.endsWith('/v1') ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
 
@@ -26,6 +26,12 @@ async function chat({ messages, config, temperature = 0.3, allowTools = true }) 
     messages,
     temperature
   };
+  // 透传频率/存在惩罚等采样参数：聊天场景用它压「别得寸进尺」这类口头禅复读
+  if (extra && typeof extra === 'object') {
+    for (const k of ['top_p', 'frequency_penalty', 'presence_penalty', 'max_tokens']) {
+      if (extra[k] !== undefined && extra[k] !== null) body[k] = extra[k];
+    }
+  }
   if (allowTools && tools) {
     body.tools = tools.toOpenAITools();
     body.tool_choice = 'auto';

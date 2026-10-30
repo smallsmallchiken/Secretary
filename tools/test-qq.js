@@ -92,7 +92,13 @@ check('cleanReply 剥前缀', _internals.cleanReply('回复：好的') === '好�
 check('cleanReply SKIP 拒回', _internals.cleanReply('[SKIP]') === null);
 check('cleanReply 空串拒回', _internals.cleanReply('   ') === null);
 check('cleanReply 截断 120', _internals.cleanReply('啊'.repeat(300)).length <= 120);
-check('cleanReply 只取第一行', _internals.cleanReply('第一句\n第二句') === '第一句');
+// 换行会压成空格（分条只认 ||，模型爱拿换行排版，不能让它变成两条消息）
+check('cleanReply 换行压成空格', _internals.cleanReply('第一句\n第二句') === '第一句 第二句');
+check('cleanReply 保留 || 分条', _internals.cleanReply('行吧||那你自己看着办') === '行吧||那你自己看着办');
+check('bubblesOf 切开', _internals.bubblesOf('行吧||那你自己看着办').length === 2);
+check('bubblesOf 滤掉空段', _internals.bubblesOf('行吧||||好的').length === 2);
+check('cleanReply 分条最多三条', _internals.bubblesOf(_internals.cleanReply('a||b||c||d||e')).length === 3);
+check('cleanReply 单条限长 60', _internals.bubblesOf(_internals.cleanReply('啊'.repeat(200)))[0].length <= 60);
 check('normalize 去标点空白', _internals.normalize('好 的，没！问题~') === '好的没问题');
 check('cleanReply 剥配图标记', _internals.cleanReply('哈哈 [图:meme-1.png]') === '哈哈');
 check('cleanReply 纯配图标记为空', _internals.cleanReply('[图:meme-1.png]') === null);
