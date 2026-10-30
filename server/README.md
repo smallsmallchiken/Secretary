@@ -17,7 +17,11 @@
 ```
 
 - **qqbot 容器**用 `--network host`：NapCat 的 WS 只监听宿主机回环，走桥接网络连不上，
-  而且 3001 也不该暴露到公网（实测从外网连 3001/6099 都是超时，只有 22 开着）。
+  而且 3001 也不该暴露到公网（实测从外网连 3001/6099 都是超时，只有 22/80 开着）。
+- 桌宠（本地 Windows）如果也想看一眼消息，走 nginx 反代而不是开端口：
+  `/etc/nginx/default.d/qqws.conf` 里 `location /qqws` → `proxy_pass http://127.0.0.1:3001`
+  （带 Upgrade/Connection 头），对外就是 `ws://8.139.252.197/qqws`。
+  **但别让桌宠和 qqbot 同时连**：两边都会回复，同一个好友会收到两条。
 - **NapCat 容器必须挂 `/opt/secretary:ro`**。发图片/发语音用的是
   `file:///opt/secretary/.data/media/...` 这种绝对路径，NapCat 是在**它自己的容器**里
   解析这个路径的，不挂就是"文件不存在"。
