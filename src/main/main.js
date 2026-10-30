@@ -6,15 +6,16 @@ const { app, ipcMain, shell, screen } = require('electron');
 const config = require('../core/config');
 const agent = require('../core/agent');
 const reminder = require('../core/tools/reminder');
-const qqbot = require('../core/qq/bot');
-const wxbot = require('../core/wechat/bot');
 const windows = require('./windows');
 const wander = require('./wander');
-const napcat = require('./napcat');
-const wechatApp = require('./wechat-app');
 const { createTray, refreshTray } = require('./tray');
 const { registerShortcuts, unregisterShortcuts } = require('./shortcuts');
 const { dbg } = require('../core/debug');
+
+// QQ / 微信值守已经整体搬到 Linux 服务器（8.139.252.197）跑，本地桌宠不再提供这两项服务：
+// 不连 WS、不拉 NapCat、不拉微信客户端、也没有值守进程可开。
+// 相关代码（src/core/qq/、src/core/wechat/、main/napcat.js、main/wechat-app.js）全部留着，
+// 服务器端跑的就是同一份 src/core/qq/，将来要回退到本地也不用重写。这里只是断掉本地入口。
 
 // 兜住未捕获异常，否则主进程会静默退出，什么线索都不留
 process.on('uncaughtException', (err) => {
@@ -157,14 +158,11 @@ function registerIpc() {
   });
 
   ipcMain.on('pet:context-menu', () => {
-    // 菜单是同步渲染的，只能用缓存；顺手刷一下，下次打开就是准的
-    wxbot.refresh().catch(() => {});
     windows.showContextMenu(buildMenuItems());
   });
 
   // 对话框上右键 → 同一个菜单（里面能进设置、隐藏桌宠、退出）
   ipcMain.on('bubble:context-menu', () => {
-    wxbot.refresh().catch(() => {});
     windows.pinBubble(20000); // 菜单弹出期间别把气泡收了
     windows.showContextMenu(buildMenuItems());
   });
@@ -268,42 +266,10 @@ function registerIpc() {
 
 function buildMenuItems() {
   const wanderOn = config.get('behavior.allowWander', true) !== false;
-  const qqSt = qqbot.status();
-  const wxSt = wxbot.status();
-
-  // QQ 的白名单条目分「好友」和「群」两种，混着数成「N人」会让人看不懂，
-  // 而且开着 allFriends 时名单根本不是生效范围（所有好友都回）。
-  const qqWl = qqSt.whitelist || [];
-  const qqFriends = qqWl.filter((x) => x && x.qq).length;
-  const qqGroups = qqWl.filter((x) => x && x.group).length;
-  const qqScope = qqSt.allFriends
-    ? qqGroups
-      ? `全好友+${qqGroups}群`
-      : '全好友'
-    : [qqFriends ? `${qqFriends}人` : '', qqGroups ? `${qqGroups}群` : ''].filter(Boolean).join('+') || '空';
-  const qqHint = qqSt.running
-    ? `值守中(${qqScope})`
-    : qqSt.enabled
-      ? '已启用(未连上)'
-      : '关';
-
-  // 微信这边是全回模式（replyToAll），没有固定名单可数，写「全部私聊」比空着清楚；
-  // smart 群里只在被 @/点名/接话时开口，所以单独标出来，别让人以为群聊不回了。
-  const wxScope = wxSt.replyToAll
-    ? wxSt.groupMode === 'all'
-      ? '私聊+群'
-      : wxSt.groupMode === 'smart'
-        ? '私聊+群(被叫才回)'
-        : '全部私聊'
-    : `${wxSt.whitelistCount}个会话`;
-  const wxHint = !wxSt.available ? '未配置' : wxSt.running ? `值守中(${wxScope})` : '关';
 
   return [
     { id: 'wander_toggle', label: '自己漫步', hint: wanderOn ? '开' : '关' },
     { id: 'walk', label: '自己溜达一圈' },
-    { sep: true },
-    { id: 'qq_toggle', label: 'QQ 自动回复', hint: qqHint, danger: qqSt.running },
-    { id: 'wx_toggle', label: '微信自动回复', hint: wxHint, danger: wxSt.running },
     { sep: true },
     { id: 'settings', label: '设置' },
     { sep: true },
@@ -324,39 +290,6 @@ function runMenuAction(id) {
     }
     case 'walk':
       wander.nudge();
-      break;
-    case 'qq_toggle':
-      qqbot
-        .toggle()
-        .then((st) => {
-          dbg('[qq] 菜单切换后状态:', JSON.stringify(st));
-          if (!st.running && !st.enabled) {
-            windows.showBubble();
-            windows.sendToBubble('bubble:push', {
-              role: 'assistant',
-              text: 'QQ 自动回复没开起来：白名单还是空的。把要替你回的人加进 .data/config.json 的 qq.whitelist（QQ 号和备注），再开一次。'
-            });
-          }
-        })
-        .catch((err) => dbg('[qq] 切换失败:', err.message));
-      break;
-    case 'wx_toggle':
-      wxbot
-        .toggle()
-        .then((st) => {
-          dbg('[wx] 菜单切换后状态:', JSON.stringify(st));
-          // 开关状态也落进 config：wechat.autostart 决定下次启动要不要自动拉起，
-          // 手动开一次却因为配置是 false 又被看门狗放着不管，会让人以为开关失灵。
-          config.set({ wechat: { autostart: !!st.running } });
-          if (!st.available) {
-            windows.showBubble();
-            windows.sendToBubble('bubble:push', {
-              role: 'assistant',
-              text: '微信自动回复需要 wechat-bot/py312 那个 Python 环境，现在找不到。'
-            });
-          }
-        })
-        .catch((err) => dbg('[wx] 切换失败:', err.message));
       break;
     case 'settings':
       // 点开设置后别让面板因为失焦立刻收起，否则用户还没看清就没了
@@ -391,7 +324,6 @@ function quitApp() {
   global.__quitting = true;
   try {
     wander.stop();
-    qqbot.shutdown();
   } catch {
     /* ignore */
   }
@@ -407,43 +339,10 @@ app.whenReady().then(() => {
   registerShortcuts();
   wander.start();
 
-  // NapCat（QQ 自动回复的"另一头"）没在跑就替用户拉起来，快速登录 + 开 3001 WS。
-  // 不拉的话：开机只有桌宠自己，NapCat 不会自己起来，QQ 会一直"连接中"。
-  // QQ 值守整体搬到服务器之后本地就只剩桌宠，开关是关的 —— 这时别去探端口、别去拉，
-  // 否则会白开一个本地 QQ 内核，还跟服务器的机器人抢同一个号。
-  if (config.get('qq.enabled', true) !== false) napcat.init();
-  else dbg('[napcat] 本地 QQ 值守已关闭（迁到服务器），跳过 NapCat');
-
-  // 微信客户端同理：值守进程要有窗口才能干活，客户端不在跑就拉起来
-  wechatApp.init();
-
-  // QQ 自动回复：上次开着就恢复，收发结果通过气泡播报
-  qqbot.init((text) => {
-    windows.showBubble();
-    windows.sendToBubble('bubble:push', { role: 'assistant', text, data: { kind: 'qq' } });
-  });
-
-  // 微信自动回复：跑在独立的 python 进程里，这里只负责开关和状态跟踪。
-  // 退出桌宠**不**顺手杀掉它 —— 它是独立值守的服务，说停才停（右键菜单里能停）。
-  wxbot.setNotifier((text) => {
-    windows.showBubble();
-    windows.sendToBubble('bubble:push', { role: 'assistant', text, data: { kind: 'wx' } });
-  });
-  wxbot
-    .refresh(true)
-    .then((st) => dbg('[wx] 初始状态:', JSON.stringify(st)))
-    .catch((err) => dbg('[wx] 初始状态失败:', err.message));
-  // 右键菜单要同步返回，只能用缓存，所以后台每 5 秒刷一次；顺便当看门狗：
-  // 标志是「用户本来要它开着」却查不到进程，就自动重新拉起（防止值守悄悄掉线）
-  // wechat.autostart=false 表示值守在服务器上，本地只刷状态给菜单看，绝不自动拉起。
-  const wxTimer = setInterval(() => {
-    const wxAuto = config.get('wechat.autostart', true) !== false;
-    wxbot
-      .refresh()
-      .then(() => (wxAuto ? wxbot.ensureRunning() : null))
-      .catch(() => {});
-  }, 5000);
-  if (wxTimer.unref) wxTimer.unref();
+  // QQ / 微信值守在服务器上（NapCat + qqbot 容器），本地只当桌宠：
+  // 不拉 NapCat、不拉微信客户端、不连 OneBot WS、不刷值守状态，也没有微信看门狗。
+  // 同一时间只允许一边值守——本地再起一套会和服务器抢同一个号、重复回复、主动消息双发。
+  // 想临时回退到本地：把 server 上 qqbot 容器停掉，再按 git 历史恢复这里的接线。
 
   // 恢复未到期的提醒
   dbg('[reminder] init 读取到', reminder.list().length, '条待办');
@@ -500,4 +399,4 @@ app.on('will-quit', () => {
   unregisterShortcuts();
 });
 
-module.exports = { handleUserMessage, quitApp, runQuick, applyAutoLaunch };
+module.exports = { handleUserMessage, quitApp, runQuick, applyAutoLaunch, buildMenuItems };

@@ -17,17 +17,20 @@ Windows 桌面宠（Electron），带可被 LLM 调用的工具层。核心是"�
 
 改桌宠逻辑通常不涉及这三个；改它们之前先读各自 README，里面写满了踩过的坑。
 
-## 部署现状（2026-10-30 起）
+## 部署现状（2026-10-31 起）
 
-**QQ 与微信的值守已经整体迁到 Linux 服务器（`8.139.252.197`）跑，本地只保留桌宠。**
+**QQ 与微信值守全部在 Linux 服务器（`8.139.252.197`）上跑，本地桌宠不提供这两项服务。**
 
-- 本地 `.data/config.json` 里 `qq.enabled=false`、`wechat.autostart=false`。
-  这两个开关关着时：不连 WS、不拉本地 NapCat（`main.js` 里 `napcat.init()` 前有判断）、
-  微信看门狗也不自动拉起 `bot_db.py`（`main.js` 的 5 秒定时器里判断 `wechat.autostart`）。
-- **别在本地再起一套值守**：同一个 QQ 号/微信同时登两边会互相抢消息、重复回复。
-- 本地仍保留全部代码，作为服务器挂掉时的退路：右键菜单点开对应开关即可恢复本地值守，
-  微信开关会同步写回 `wechat.autostart`。
-- 服务器上跑的是完整机器人（收发 + LLM 回复），本地桌宠不再参与消息生成。
+- 本地 `.data/config.json`：`qq.enabled=false`、`wechat.autostart=false`；`config.js` 里
+  `wechat.autostart` 默认也改成了 `false`。
+- `src/main/main.js` 里**没有任何** `qqbot.init / wxbot.* / napcat.init / wechatApp.init` 调用，
+  右键菜单也没有「QQ 自动回复 / 微信自动回复」两项。本地不会连 OneBot WS、不拉 NapCat、
+  不拉微信客户端、不跑微信看门狗。
+- 相关代码（`src/core/qq/`、`src/core/wechat/`、`main/napcat.js`、`main/wechat-app.js`）全部保留：
+  服务器端跑的就是同一份 `src/core/qq/`，回退到本地时按 git 历史把接线补回来即可。
+- **同一时间只允许一边值守**：本地再起一套会和服务器抢同一个号、重复回复、主动消息双发。
+- 服务器上是完整 QQ 机器人（NapCat + OneBot WS + 主动消息调度），细节见 `server/README.md`；
+  服务器上 NapCat 的坑（配置匿名卷、安全组、扫码）见 `.workbuddy/memory/2026-10-30.md`。
 
 ## 启动
 
