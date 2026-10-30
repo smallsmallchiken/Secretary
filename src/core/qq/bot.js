@@ -1164,5 +1164,5 @@ module.exports = {
   shutdown,
   setNotifier,
   // 内部函数导出仅供测试
-  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile, setTtsImpl, LONG_VOICE_RE, VOICE_REQ_RE }
+  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile, setTtsImpl, generateReply, LONG_VOICE_RE, VOICE_REQ_RE, VOICE_SAY_MAX }
 };
