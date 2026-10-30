@@ -61,3 +61,6 @@ wecom-bot/*.log
 
 # 主动发消息的配额状态（运行态）
 wechat-bot/proactive-state.json
+
+# 塔菲克隆样本与试听（本地素材，不进仓库）
+wechat-bot/taffy-samples/
