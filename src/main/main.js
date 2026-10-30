@@ -345,6 +345,9 @@ function runMenuAction(id) {
         .toggle()
         .then((st) => {
           dbg('[wx] 菜单切换后状态:', JSON.stringify(st));
+          // 开关状态也落进 config：wechat.autostart 决定下次启动要不要自动拉起，
+          // 手动开一次却因为配置是 false 又被看门狗放着不管，会让人以为开关失灵。
+          config.set({ wechat: { autostart: !!st.running } });
           if (!st.available) {
             windows.showBubble();
             windows.sendToBubble('bubble:push', {
@@ -406,7 +409,10 @@ app.whenReady().then(() => {
 
   // NapCat（QQ 自动回复的"另一头"）没在跑就替用户拉起来，快速登录 + 开 3001 WS。
   // 不拉的话：开机只有桌宠自己，NapCat 不会自己起来，QQ 会一直"连接中"。
-  napcat.init();
+  // QQ 值守整体搬到服务器之后本地就只剩桌宠，开关是关的 —— 这时别去探端口、别去拉，
+  // 否则会白开一个本地 QQ 内核，还跟服务器的机器人抢同一个号。
+  if (config.get('qq.enabled', true) !== false) napcat.init();
+  else dbg('[napcat] 本地 QQ 值守已关闭（迁到服务器），跳过 NapCat');
 
   // 微信客户端同理：值守进程要有窗口才能干活，客户端不在跑就拉起来
   wechatApp.init();
@@ -429,10 +435,12 @@ app.whenReady().then(() => {
     .catch((err) => dbg('[wx] 初始状态失败:', err.message));
   // 右键菜单要同步返回，只能用缓存，所以后台每 5 秒刷一次；顺便当看门狗：
   // 标志是「用户本来要它开着」却查不到进程，就自动重新拉起（防止值守悄悄掉线）
+  // wechat.autostart=false 表示值守在服务器上，本地只刷状态给菜单看，绝不自动拉起。
   const wxTimer = setInterval(() => {
+    const wxAuto = config.get('wechat.autostart', true) !== false;
     wxbot
       .refresh()
-      .then(() => wxbot.ensureRunning())
+      .then(() => (wxAuto ? wxbot.ensureRunning() : null))
       .catch(() => {});
   }, 5000);
   if (wxTimer.unref) wxTimer.unref();
