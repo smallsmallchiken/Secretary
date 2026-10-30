@@ -305,13 +305,29 @@ def send_voice(gui, text, cfg, log=print, max_seconds=VOICE_MAX_SECONDS):
 # ------------------------------------------------------------------ 素材库
 
 def pick_sticker(cfg, log=print):
-    """从本地表情图库里随机挑一张，没有就返回 None。"""
-    d = cfg.get("stickerDir") or os.path.join(HERE, "stickers")
-    if not os.path.isdir(d):
+    """从**共享**表情池挑一张，没有就返回 None。
+
+    池子在 `.data/media/pics/`，和 QQ 机器人是同一个（见 media_lib.py）。
+    QQ 那边自动收藏的梗图、以及手工拷进目录的图，这里都能直接发。
+
+    `stickerDir` 非空时仍然认它 —— 留给「就想用某个专门目录」的场合。
+    """
+    d = cfg.get("stickerDir")
+    if d:
+        if not os.path.isdir(d):
+            return None
+        exts = (".gif", ".png", ".jpg", ".jpeg", ".webp")
+        files = [os.path.join(d, f) for f in os.listdir(d)
+                 if f.lower().endswith(exts)]
+        return random.choice(files) if files else None
+
+    try:
+        import media_lib
+        path = media_lib.pick_pic("sticker")
+        if path:
+            return path
+        # 池子里还没有登记为表情包的：退一步用普通图片充数（通常是刚拷进来的）
+        return media_lib.pick_pic(None)
+    except Exception as exc:
+        log(f"  共享表情池不可用：{type(exc).__name__}: {exc}")
         return None
-    exts = (".gif", ".png", ".jpg", ".jpeg", ".webp")
-    files = [os.path.join(d, f) for f in os.listdir(d)
-             if f.lower().endswith(exts)]
-    if not files:
-        return None
-    return random.choice(files)

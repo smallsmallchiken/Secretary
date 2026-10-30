@@ -22,6 +22,7 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -114,6 +115,32 @@ def split_media_tokens(text):
 # 对方明确要语音时也回语音（QQ 那边同一套触发词）
 VOICE_TRIGGER = re.compile(r"发(条|个)?语音|语音回|用语音|语音说|说句话听听|语音呢")
 
+# 模型主动挑预置语音的标记：[语音:晚安]。单方括号带冒号，和输入侧占位符 [语音]（无冒号）不撞车。
+TOKEN_VOICE = re.compile(r"[\[【]{1,2}\s*语音\s*[:：]\s*([^\]】]+)[\]】]+")
+
+
+def split_voice_token(text):
+    """剥出 [语音:内容] 标记。返回 (干净文本, 语音内容 or None)。"""
+    if not text:
+        return "", None
+    m = TOKEN_VOICE.search(text)
+    if not m:
+        return text.strip(), None
+    voice_text = m.group(1).strip()
+    clean = TOKEN_VOICE.sub("", text).strip()
+    return clean, voice_text or None
+
+
+# 预置语音的提示词规则。只在开了 voiceReply 且共享池里真有预置片段时注入——
+# 没有现成音频却教模型输出标记，标记会被当普通文字发出去。
+VOICE_RULES = """手头有几条现成的语音（我的声音）可以随回复发出去，格式是 [语音:内容]：
+{list}
+
+语音规矩：
+- 对方发了语音、或那句话特别适合出声（撒娇、嫌弃、偷笑）时，从清单里挑最贴的一条写在回复最末尾
+- 也可以只发语音不说话（整条回复只写 [语音:内容]）
+- 大多数时候还是打字；一次最多一条；只能从清单里挑，清单外的发不了"""
+
 
 def load_config():
     cfg = dict(DEFAULTS)
@@ -181,6 +208,14 @@ def build_system_prompt(cfg, is_group):
     ]
     if cfg.get("emojiReply") or cfg.get("stickerReply"):
         parts.append(MEDIA_RULES)
+    if cfg.get("voiceReply"):
+        try:
+            import media_lib
+            vlist = media_lib.preset_list_text()
+        except Exception:
+            vlist = ""
+        if vlist:
+            parts.append(VOICE_RULES.replace("{list}", vlist))
     if is_group and cfg.get("groupMode", "smart") == "smart":
         parts.append(GROUP_RULES)
     return "\n\n".join(parts)
@@ -359,6 +394,7 @@ class DbBot:
                           else self.cfg["historyLimit"])
         msgs = self.db.get_messages(username, limit=limit)
         rows = []
+        raws = []  # 和 rows 一一对应的原始数据库行（收图要 local_id）
         for m in msgs:
             sender = m.get("sender_username") or ""
             content = clean_content(m)
@@ -372,11 +408,16 @@ class DbBot:
             else:
                 label = "对方"
             rows.append((mine, label, content, (m.get("type") or "").strip()))
+            raws.append(m)
         rows.reverse()  # 翻成时间正序
+        raws.reverse()
         incoming, who, last_type = None, None, ""
-        for mine, label, content, ctype in reversed(rows):
+        # 从最新往回找第一条「不是我发的」
+        for i in range(len(rows) - 1, -1, -1):
+            mine, label, content, ctype = rows[i]
             if not mine:
                 incoming, who, last_type = content, label, ctype
+                self._last_incoming_row = raws[i] if i < len(raws) else None
                 break
         if is_group:
             history = "\n".join(f"[{label}] {c}" for _, label, c, _ in rows)
@@ -506,6 +547,52 @@ class DbBot:
             pass
         return True
 
+    # ------------------------------------------------------------ 收图入池
+    def collect_image(self, username):
+        """把对方发来的图片解密后收进**共享**表情池（和 QQ 同一个池）。
+
+        走后台线程：解密要读 .dat、可能还要问一次视觉模型打标，几十毫秒到几十秒
+        都有，绝不能卡住回复。失败一律吞掉 —— 收藏是顺手的事，不是主链路。
+        """
+        row = getattr(self, "_last_incoming_row", None) or {}
+        local_id = row.get("local_id")
+        if not local_id:
+            return
+
+        def work():
+            try:
+                from wechatauto.media import MediaDownloader
+                dl = MediaDownloader(self.db)
+                path = dl.download_media(username, int(local_id))
+                if not path or not os.path.isfile(path):
+                    return
+                import media_lib
+                item = media_lib.add_pic_from_file(path, kind="sticker", source="wechat")
+                if not item:
+                    return
+                log(f"  收图进共享池：{item['id']}")
+                if not item.get("desc"):
+                    self._describe_pic(item)
+            except Exception as exc:
+                log(f"  收图失败（不影响回复）：{type(exc).__name__}: {exc}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _describe_pic(self, item):
+        """视觉模型写一句用途描述，回写共享库 —— 和 QQ 侧的 describeMeme 同一件事。"""
+        try:
+            import media_lib
+            import vlm
+            base, key = _siliconflow_cfg()
+            if not base or not key:
+                return
+            desc = vlm.describe_sticker(item["path"], {"baseUrl": base, "apiKey": key})
+            if desc:
+                media_lib.set_pic_desc(item["id"], desc)
+                log(f"  表情包描述：{item['id']} = {desc}")
+        except Exception as exc:
+            log(f"  表情包打标失败（不影响使用）：{type(exc).__name__}: {exc}")
+
     def handle_session(self, s, g, live):
         username = s.get("username") or ""
         if not username or username == self.me:
@@ -525,6 +612,10 @@ class DbBot:
             # 读不到内容时没有可用指纹，只能靠计数封顶，不然每 0.5s 刷一条日志
             self._note_fail(g, chat, "<no-incoming>", 3, "读不到对方消息")
             return False
+
+        # 对方发来的图顺手收进共享表情池（后台线程，慢/失败都不影响回复）
+        if self._last_incoming_type == "图片":
+            self.collect_image(username)
 
         # 对方回话了：如果之前主动找过他，把「没人理」计数清零
         if self.proactive is not None and name in (self.proactive.state.get("chats") or {}):
@@ -668,15 +759,28 @@ class DbBot:
     def send_reply(self, name, reply, username, incoming=""):
         cfg = self.cfg
         reply, want_emoji, want_sticker = split_media_tokens(reply)
+        # 模型主动挑了预置语音：剥出 [语音:内容]，去共享池拿现成音频
+        reply, voice_token = split_voice_token(reply)
+        preset_path = None
+        if voice_token:
+            try:
+                import media_lib
+                hit = media_lib.find_preset(voice_token)
+                preset_path = hit.get("path") if hit else None
+            except Exception as exc:
+                log(f"  预置语音查询失败：{type(exc).__name__}: {exc}")
+            if preset_path is None:
+                log(f"  模型要的语音「{voice_token}」不在预置清单里，当文字发")
         incoming_type = getattr(self, "_last_incoming_type", "")
         want_voice = (
             cfg.get("voiceAlways")
             or (cfg.get("voiceReply") and self._last_incoming_was_voice)
             or bool(VOICE_TRIGGER.search(incoming or ""))
             or bool(VOICE_TRIGGER.search(reply or ""))
+            or preset_path is not None
         )
-        if want_voice and reply:
-            if self._send_voice(name, reply, cfg):
+        if want_voice and (reply or preset_path):
+            if self._send_voice(name, reply, cfg, preset_path=preset_path):
                 return
         # 长回复拆成两三条发，段间按字数停一下（模拟打字）。一条工整的长消息
         # 本身就是最大的破绽，拆开发比调什么 temperature 都管用。
@@ -684,10 +788,19 @@ class DbBot:
             self._send_text(name, reply, cfg)
         self._send_facial(name, want_emoji, want_sticker, incoming_type, cfg)
 
-    def _send_voice(self, name, reply, cfg):
-        """发语音。voiceSendMode=voice 发真正的语音条，file 发音频文件。"""
+    def _send_voice(self, name, reply, cfg, preset_path=None):
+        """发语音。voiceSendMode=voice 发真正的语音条，file 发音频文件。
+
+        preset_path 传了就直接发这个文件（模型从预置清单挑的），不走合成，也不挑模式。"""
         mode = cfg.get("voiceSendMode", "file")
         try:
+            if preset_path:
+                r = self.gui.send_file(preset_path, who=name)
+                if _send_ok(r) or _send_uncertain(r):
+                    log(f"  已发预置语音（{os.path.basename(preset_path)}）")
+                    return True
+                log(f"  预置语音发送失败，退回文字：{r}")
+                return False
             if mode == "voice":
                 if media_send.send_voice(self.gui, reply, cfg):
                     log("  已发语音条")
@@ -798,8 +911,24 @@ def _siliconflow_cfg():
 
 
 def tts_to_file(text, cfg):
-    """文字转语音，落盘 mp3。参考 QQ 的实现（同一个 SiliconFlow 接口）。"""
+    """文字转语音，返回 mp3 路径。
+
+    先查**共享语音池**（`.data/media/voice/`）——QQ 机器人合成过的同一句话、
+    同一音色可以直接复用，不用再调一次付费接口。人工放进池子的「预置片段」
+    优先级最高，模型说「晚安」时直接取现成的，连合成都不走。
+    """
     import urllib.request
+    voice = cfg.get("ttsVoice")
+    model = cfg.get("ttsModel")
+    try:
+        import media_lib
+        hit = media_lib.find_voice(text, voice, model)
+        if hit:
+            log(f"  语音复用共享池，不调接口（{text[:16]}）")
+            return hit
+    except Exception as exc:
+        log(f"  共享语音池查询失败（照常合成）：{type(exc).__name__}: {exc}")
+
     base, key = _siliconflow_cfg()
     if not base or not key:
         raise RuntimeError("没有 API Key，无法合成语音")
@@ -807,9 +936,9 @@ def tts_to_file(text, cfg):
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"voice-{time.strftime('%H%M%S')}.mp3")
     body = json.dumps({
-        "model": cfg.get("ttsModel"),
+        "model": model,
         "input": text,
-        "voice": cfg.get("ttsVoice"),
+        "voice": voice,
         "response_format": "mp3",
     }).encode("utf-8")
     req = urllib.request.Request(
@@ -820,6 +949,14 @@ def tts_to_file(text, cfg):
         data = resp.read()
     if not data:
         raise RuntimeError("TTS 返回空")
+    # 存进共享池，下次（包括 QQ 那边）直接拿；存不进就退回本地文件
+    try:
+        import media_lib
+        saved = media_lib.put_voice(data, text, voice, model, kind="tts", source="wechat")
+        if saved:
+            return saved
+    except Exception as exc:
+        log(f"  存共享语音池失败（不影响发送）：{type(exc).__name__}: {exc}")
     with open(path, "wb") as f:
         f.write(data)
     return path

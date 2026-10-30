@@ -2,10 +2,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const config = require('../config');
 const llm = require('../llm');
 const { dbg } = require('../debug');
+const media = require('../media/library');
 const { dataDir } = require('../paths');
 const { OneBotClient } = require('./client');
 
@@ -47,6 +47,16 @@ ${memeList.trim()}
 - 大多数时候别配图，硬凑很尬；一次最多一张
 - 只能从上面清单里挑，别的图你没有`
       : '';
+  const voiceBlock =
+    opts.voiceList && opts.voiceList.trim()
+      ? `\n\n手头有几条现成的语音可以随回复发出去（我的声音），格式是 [语音:内容]：
+${opts.voiceList.trim()}
+
+语音规矩：
+- 对方发了语音、或者那句话特别适合出声（撒娇、嫌弃、偷笑）时，从清单里挑最贴的一条，写成 [语音:内容] 放在回复最末尾
+- 也可以只发语音不说话（整条回复就写 [语音:内容]）
+- 大多数时候还是打字；一次最多一条；只能从清单里挑，清单外的语音你发不了`
+      : '';
   const groupBlock = isGroup
     ? `\n\n你现在在一个群里。看群聊记录时注意：
 - 每条前面的方括号只是说话人标签，唯一作用是分清「谁说的」，别的一概不代表：不要拿它称呼任何人，不要根据它猜性别、年龄、身份、长相，也不要评论这些名字
@@ -83,7 +93,7 @@ ${memeList.trim()}
 - 群里被人叫到就随口应一句，别正式，别主动喊人，别当复读机
 - 有多条消息一起给你时，要像真人攒着看完一起回，别逐条复述
 
-最后重申：你的性格是：${persona}。每句回复都要从这个性格出发。${memeBlock}`;
+最后重申：你的性格是：${persona}。每句回复都要从这个性格出发。${memeBlock}${voiceBlock}`;
 }
 
 /** 群友要求改性格时的识别 + 人设演进提示词。
@@ -315,6 +325,7 @@ function cleanReply(text) {
   // 模型决定不回
   if (!t || t === '[SKIP]' || /^\[skip\]/i.test(t)) return null;
   t = t.replace(/\[图[:：][^\]]*\]/g, '').trim(); // 配图标记单独处理，这里剥掉
+  t = t.replace(/\[语音[:：][^\]]*\]/g, '').trim(); // 语音标记同理
   if (!t) return null;
   for (const q of ['"', "'", '「', '」', '“', '”']) {
     if (t.startsWith(q)) t = t.slice(1);
@@ -350,95 +361,46 @@ function imageDataUri(buf) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 表情包库：收藏白名单会话里出现的图，回复时可挑一张配上去              */
+/* 表情包 / 图片 / 语音                                                */
+/*                                                                     */
+/* 全部走 src/core/media/library.js 的共享库（.data/media/）。         */
+/* 微信机器人（Python）读同一份 library.json，所以表情包和语音缓存是   */
+/* 一池两用：这边收到的图那边能发，那边合成过的语音这边直接复用。       */
 /* ------------------------------------------------------------------ */
 
-const MEME_MAX_FILES = 300;
 const MEME_LIST_MAX = 25; // 提示词里最多带多少张（防 prompt 爆炸）
 const MEME_DESC_PROMPT =
   '这是一张表情包/梗图。用不超过15个字概括它适合在什么情绪或场景下发（比如：无语了、看乐子、嘲讽拉满、可爱卖萌）。只输出那句话，别描述画面细节。';
 
-let memeDirCache = null;
-let memeCatalog = null; // { seq, items: [{ name, hash, desc, addedAt }] }
-
-function memeDir() {
-  if (memeDirCache) return memeDirCache;
-  memeDirCache = path.join(dataDir(), 'memes');
-  fs.mkdirSync(memeDirCache, { recursive: true });
-  return memeDirCache;
-}
-
-function memeCatalogFile() {
-  return path.join(memeDir(), 'catalog.json');
-}
-
-function loadMemeCatalog() {
-  if (memeCatalog) return memeCatalog;
-  memeCatalog = { seq: 0, items: [] };
-  try {
-    if (fs.existsSync(memeCatalogFile())) {
-      memeCatalog = { ...memeCatalog, ...JSON.parse(fs.readFileSync(memeCatalogFile(), 'utf8')) };
-    }
-  } catch (err) {
-    dbg('[qq] 表情库目录损坏，重置：', err.message);
-  }
-  return memeCatalog;
-}
-
-function saveMemeCatalog() {
-  try {
-    const tmp = memeCatalogFile() + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(memeCatalog, null, 1), 'utf8');
-    fs.renameSync(tmp, memeCatalogFile());
-  } catch (err) {
-    dbg('[qq] 表情库目录写盘失败：', err.message);
-  }
-}
-
 function memeFile(name) {
-  // 只允许我们自己的命名格式，防路径穿越
-  return /^meme-\d+\.(png|jpg|gif|webp)$/.test(name) ? path.join(memeDir(), name) : null;
+  const hit = media.findPic(name);
+  return hit ? hit.path : null;
 }
 
-/** 收藏一张图（Buffer）。新图落盘并排队让视觉模型写用途描述；重复图跳过。异步不阻塞回复。 */
+/** 收藏一张图（Buffer）进共享池。重复图（md5 相同）直接跳过。异步不阻塞回复。 */
 async function collectMeme(buf) {
   try {
-    if (!getCfg().memes || !buf || buf.length < 2000) return; // 太小的当垃圾图
-    const cat = loadMemeCatalog();
-    const hash = crypto.createHash('md5').update(buf).digest('hex');
-    if (cat.items.some((x) => x.hash === hash)) return;
-    let ext = 'jpg';
-    if (buf[0] === 0x89 && buf[1] === 0x50) ext = 'png';
-    else if (buf[0] === 0x47 && buf[1] === 0x49) ext = 'gif';
-    else if (buf.slice(0, 4).toString('latin1') === 'RIFF') ext = 'webp';
-    const name = `meme-${++cat.seq}.${ext}`;
-    fs.writeFileSync(path.join(memeDir(), name), buf);
-    const item = { name, hash, desc: '', addedAt: Date.now() };
-    cat.items.push(item);
-    // 超量删最老的（连文件一起删）
-    while (cat.items.length > MEME_MAX_FILES) {
-      const old = cat.items.shift();
-      try {
-        fs.unlinkSync(path.join(memeDir(), old.name));
-      } catch {
-        /* ignore */
-      }
-    }
-    saveMemeCatalog();
-    dbg('[qq] 收藏表情包:', name);
-    describeMeme(item); // 后台写描述，不阻塞
+    if (!getCfg().memes) return null;
+    const item = media.addPic(buf, { kind: 'sticker', from: 'qq' });
+    if (!item) return null;
+    dbg('[qq] 收图进共享池:', item.id, item.desc ? '(已有描述)' : '(待打标)');
+    if (!item.desc) describeMeme(item).catch(() => {}); // 后台写描述，不阻塞回复
+    return item;
   } catch (err) {
     dbg('[qq] 收藏表情包失败：', err.message);
+    return null;
   }
 }
 
-/** 视觉模型给表情包写一句话用途描述，写完落盘 */
+/** 视觉模型给表情包写一句话用途描述，回写到共享库索引 */
 async function describeMeme(item) {
   try {
     const cfg = getCfg();
     const llmCfg = config.getLLM();
     if (!llmCfg || !llmCfg.apiKey) return;
-    const buf = fs.readFileSync(path.join(memeDir(), item.name));
+    const file = media.findPic(item.id);
+    if (!file) return;
+    const buf = fs.readFileSync(file.path);
     const msg = await llm.chat({
       messages: [
         {
@@ -453,22 +415,17 @@ async function describeMeme(item) {
       allowTools: false,
       temperature: 0.3
     });
-    item.desc = String(msg.content || '').trim().split('\n')[0].slice(0, 30);
-    saveMemeCatalog();
-    dbg('[qq] 表情包描述:', item.name, item.desc);
+    const desc = String(msg.content || '').trim().split('\n')[0].slice(0, 30);
+    if (desc) media.setPicDesc(item.id, desc);
+    dbg('[qq] 表情包描述:', item.id, desc);
   } catch (err) {
-    dbg('[qq] 表情包描述失败:', item && item.name, err.message);
+    dbg('[qq] 表情包描述失败:', item && item.id, err.message);
   }
 }
 
 /** 提示词用的表情包清单（有描述的按新到旧取一批） */
 function memeListText() {
-  const cat = loadMemeCatalog();
-  const list = cat.items
-    .filter((x) => x.desc && fs.existsSync(path.join(memeDir(), x.name)))
-    .sort((a, b) => b.addedAt - a.addedAt)
-    .slice(0, MEME_LIST_MAX);
-  return list.map((x) => `[图:${x.name}] = ${x.desc}`).join('\n');
+  return media.picListText({ kind: 'sticker', max: MEME_LIST_MAX });
 }
 
 function audioBase(llmCfg, tail) {
@@ -502,8 +459,15 @@ async function transcribeAudio(url, cfg) {
   return (d.text || '').trim() || null;
 }
 
-/** 文字转语音并落盘。返回 mp3 文件路径 */
+/** 文字转语音。先查共享语音池（同一句 + 同一音色两端可复用），没有再调接口。 */
 async function ttsToFile(text, cfg) {
+  const model = cfg.ttsModel || TTS_MODEL_DEFAULT;
+  const voice = cfg.ttsVoice || TTS_VOICE_DEFAULT;
+  const cached = media.findVoice(text, voice, model);
+  if (cached) {
+    dbg('[qq] 语音复用共享池，不调接口：', text.slice(0, 20));
+    return cached;
+  }
   const llmCfg = config.getLLM();
   if (!llmCfg || !llmCfg.apiKey) throw new Error('没有配置模型服务');
   const controller = new AbortController();
@@ -514,9 +478,9 @@ async function ttsToFile(text, cfg) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${llmCfg.apiKey}` },
       body: JSON.stringify({
-        model: cfg.ttsModel || TTS_MODEL_DEFAULT,
+        model,
         input: text,
-        voice: cfg.ttsVoice || TTS_VOICE_DEFAULT,
+        voice,
         response_format: 'mp3'
       }),
       signal: controller.signal
@@ -529,6 +493,9 @@ async function ttsToFile(text, cfg) {
     throw new Error(`TTS HTTP ${res.status} ${t.slice(0, 120)}`);
   }
   const buf = Buffer.from(await res.arrayBuffer());
+  const saved = media.putVoice(buf, { text, voice, model, kind: 'tts', from: 'qq' });
+  if (saved) return saved;
+  // 落库失败（磁盘满 / 权限）也不能把这条语音卡掉，退回临时文件
   const dir = path.join(path.dirname(stateFile()), 'tts');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `reply-${Date.now()}.mp3`);
@@ -565,7 +532,10 @@ async function generateReply({ history, incoming, imageUri, cfg, isGroup, addres
     messages: [
       {
         role: 'system',
-        content: buildSystemPrompt(cfg.persona, cfg.memes ? memeListText() : '', { isGroup })
+        content: buildSystemPrompt(cfg.persona, cfg.memes ? memeListText() : '', {
+          isGroup,
+          voiceList: cfg.voiceReply ? media.presetListText() : ''
+        })
       },
       {
         role: 'user',
@@ -586,7 +556,10 @@ async function generateReply({ history, incoming, imageUri, cfg, isGroup, addres
   const raw = String(msg.content || '');
   const memeTag = raw.match(/\[图[:：]\s*([^\]\s]+)\]/);
   const memePath = memeTag ? memeFile(memeTag[1]) : null;
-  return [cleanReply(raw), memePath, ''];
+  // 拆出预置语音标记：[语音:晚安] → 共享语音池里的现成 mp3
+  const voiceTag = raw.match(/\[语音[:：]\s*([^\]]+)\]/);
+  const voicePath = voiceTag ? media.findPreset(voiceTag[1].trim()) : null;
+  return [cleanReply(raw), memePath, '', voicePath ? voicePath.path : null];
 }
 
 /* ------------------------------------------------------------------ */
@@ -951,8 +924,9 @@ async function flushChat(qq) {
   const history = isGroup ? memoryText(qq, cfg.memoryContext) : ctx;
   let reply = null;
   let memePath = null;
+  let presetVoice = null;
   try {
-    const [gen, meme, err] = await generateReply({
+    const [gen, meme, err, vp] = await generateReply({
       history,
       incoming,
       imageUri,
@@ -960,12 +934,13 @@ async function flushChat(qq) {
       isGroup,
       addressed: items.some((i) => i.addressed)
     });
-    if (!gen && !meme) {
+    if (!gen && !meme && !vp) {
       dbg('[qq]', name, '这次不接话：', err || '模型判断跟他没关系/输出为空');
       return;
     }
     reply = gen;
     memePath = meme && fs.existsSync(meme) ? meme : null;
+    presetVoice = vp && fs.existsSync(vp) ? vp : null;
   } catch (err) {
     dbg('[qq]', name, '生成失败：', err.message);
     return;
@@ -976,18 +951,19 @@ async function flushChat(qq) {
     return;
   }
 
-  // 发语音的条件：对方发了语音 / 明确要语音 / 配置 voiceAlways。失败退回文字
+  // 发语音的条件：对方发了语音 / 明确要语音 / 模型主动挑了预置语音 / 配置 voiceAlways。失败退回文字
   const voiceReq = /发(条|个|个)?语音|语音回|用语音|语音说|语音呢|说句话听听/.test(incoming);
-  const wantVoice = !!getCfg().voiceReply && !!(voiceUrl || getCfg().voiceAlways || voiceReq);
+  const wantVoice = !!getCfg().voiceReply && !!(presetVoice || voiceUrl || getCfg().voiceAlways || voiceReq);
   const sentIds = []; // 这次发出去的消息 id，别人引用回复时能认出「这是说我」
   let sentVoice = false;
-  if (client && wantVoice && reply) {
+  if (client && wantVoice && (reply || presetVoice)) {
     try {
-      const file = await ttsToFile(reply, getCfg());
+      // 有预置片段就直接用（零 API 开销），没有才现场合成
+      const file = presetVoice || (await ttsToFile(reply, getCfg()));
       const r = await client.sendRecord(isGroup, targetId, file);
       if (r && r.message_id) sentIds.push(Number(r.message_id));
       sentVoice = true;
-      dbg('[qq] 已发送语音 ->', name, reply);
+      dbg('[qq] 已发送语音 ->', name, presetVoice ? '(预置) ' + path.basename(presetVoice) : reply);
     } catch (err) {
       dbg('[qq]', name, '语音发送失败，退回文字：', err.message);
     }
@@ -1068,5 +1044,5 @@ module.exports = {
   shutdown,
   setNotifier,
   // 内部函数导出仅供测试
-  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, loadMemeCatalog, saveMemeCatalog, memeDir }
+  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, media }
 };

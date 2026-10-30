@@ -92,6 +92,30 @@ def _ask(cfg, prompt, img, model=None, max_tokens=500, timeout=150):
         return None, str(data)[:200]
 
 
+STICKER_PROMPT = (
+    "这是一张表情包/梗图。用不超过15个字概括它适合在什么情绪或场景下发"
+    "（比如：无语了、看乐子、嘲讽拉满、可爱卖萌）。只输出那句话，别描述画面细节。"
+)
+
+
+def describe_sticker(path, cfg):
+    """给一张表情包写用途描述，供共享表情库（QQ 那边读同一份库）。
+
+    失败返回空串 —— 打标只是「让模型知道这张图能用在什么场景」，
+    没描述大不了这条不进提示词清单，绝不能因为打标失败就丢图。
+    """
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            img.load()
+            txt, _err = _ask(cfg, STICKER_PROMPT, img, max_tokens=60, timeout=90)
+    except Exception:
+        return ""
+    if not txt:
+        return ""
+    return txt.strip().split("\n")[0].strip().strip("「」\"'“”")[:30]
+
+
 def _clean_name(s):
     """模型爱加序号、引号、时间、冒号，剥掉。"""
     t = s.strip().strip("「」\"'“”*`")

@@ -293,19 +293,22 @@ async function main() {
       const gSent = received.find((r) => r.action === 'send_group_msg');
       check('群回复发给正确的群', gSent && String(gSent.params.group_id) === '888');
 
-      // 用例 J：模型回配图标记 → 文字+图片段发出（表情包库测试）
-      // 备份并清空表情库目录，造一张假表情包
-      const MEMES_DIR = path.join(DATA_DIR, 'memes');
-      const MEME_CATALOG = path.join(MEMES_DIR, 'catalog.json');
-      const memesBackup = fs.existsSync(MEME_CATALOG) ? fs.readFileSync(MEME_CATALOG, 'utf8') : null;
-      fs.rmSync(MEMES_DIR, { recursive: true, force: true });
-      fs.mkdirSync(MEMES_DIR, { recursive: true });
-      fs.writeFileSync(path.join(MEMES_DIR, 'meme-1.png'), Buffer.from('fakepngdata-'.repeat(300)));
-      const cat = _internals.loadMemeCatalog();
-      cat.seq = 1;
-      cat.items = [{ name: 'meme-1.png', hash: 'x', desc: '无语时用', addedAt: Date.now() }];
-      _internals.saveMemeCatalog();
+      // 用例 J：模型回配图标记 → 文字+图片段发出（共享媒体库）
+      // 造一张假表情包进共享池（.data/media/pics/，微信那边读的是同一个目录）
+      const MEDIA_DIR = path.join(DATA_DIR, 'media');
+      const PICS_DIR = path.join(MEDIA_DIR, 'pics');
+      const mediaLib = _internals.media;
+      fs.rmSync(MEDIA_DIR, { recursive: true, force: true });
+      fs.mkdirSync(PICS_DIR, { recursive: true });
+      fs.writeFileSync(path.join(PICS_DIR, 'meme-1.png'), Buffer.from('fakepngdata-'.repeat(300)));
+      mediaLib.syncFromDisk(true); // 手工丢进目录的素材靠这一句进索引
+      mediaLib.setPicDesc('meme-1.png', '无语时用');
       check('表情包清单可读', _internals.memeListText().includes('meme-1.png'));
+      check(
+        '清单带用途描述',
+        _internals.memeListText().includes('无语时用'),
+        _internals.memeListText()
+      );
 
       // llm 桩临时改成只回配图标记（纯图无文字）
       const origBehavior = llmStub.behavior;
@@ -420,14 +423,12 @@ async function main() {
       bot.shutdown();
       wss.close();
     } finally {
-      // 恢复表情库目录
+      // 数据目录本身是临时目录，整个删掉即可（线上 .data 完全没被碰过）
       try {
-        fs.rmSync(path.join(DATA_DIR, 'memes'), { recursive: true, force: true });
-        if (memesBackup !== null) {
-          fs.mkdirSync(path.join(DATA_DIR, 'memes'), { recursive: true });
-          fs.writeFileSync(path.join(DATA_DIR, 'memes', 'catalog.json'), memesBackup, 'utf8');
-        }
-      } catch { /* ignore */ }
+        fs.rmSync(path.join(DATA_DIR, 'media'), { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
       // 恢复真实配置与状态
       if (configBackup !== null) fs.writeFileSync(CONFIG_FILE, configBackup, 'utf8');
       else if (fs.existsSync(CONFIG_FILE)) fs.unlinkSync(CONFIG_FILE);
