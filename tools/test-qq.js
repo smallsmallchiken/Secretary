@@ -363,6 +363,58 @@ async function main() {
       );
       llmStub.behavior = origBehavior; // 还原桩
 
+      // 用例 L：要「长一点的语音」→ 跳过短预置，现场合成整段
+      config.set({ qq: { voiceReply: true } }); // 测试环境默认没开语音回复
+      check('识别「再发个长一点的语音」', _internals.LONG_VOICE_RE.test('再发个长一点的语音'));
+      check('识别「你多说几句」', _internals.LONG_VOICE_RE.test('你多说几句'));
+      check('不误伤普通「发个语音」', !_internals.LONG_VOICE_RE.test('发个语音'));
+
+      const presetPath = mediaLib.putVoice(Buffer.from('ID3-preset-mp3'), {
+        text: '晚安', kind: 'preset', voice: 'test', model: 'test'
+      });
+      check('造出一条预置语音', !!presetPath && fs.existsSync(presetPath), String(presetPath));
+
+      const fakeLong = path.join(DATA_DIR, 'fake-long.mp3');
+      fs.writeFileSync(fakeLong, Buffer.from('ID3-long-mp3'));
+      const ttsCalls = [];
+      _internals.setTtsImpl((text) => {
+        ttsCalls.push(text);
+        return fakeLong;
+      });
+
+      // 模型既给了长文本、又挑了短预置 —— 要长语音时应该丢掉预置去合成
+      llmStub.behavior = () =>
+        '行吧，那我就多说两句。这两天服务器上那点事你也知道，来来回回折腾了好几趟，现在总算是跑顺了，剩下的就是慢慢调。 [语音:晚安]';
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'private', sub_type: 'friend',
+        user_id: 10001, message_id: 500, message: [{ type: 'text', data: { text: '再发个长一点的语音' } }]
+      });
+      const longSent = received.filter((r) => r.action === 'send_private_msg').pop();
+      check('长语音走现场合成（不用短预置）', ttsCalls.length === 1, `tts 调用 ${ttsCalls.length} 次`);
+      check(
+        '长语音发出 record 段',
+        longSent && longSent.params.message.some((s) => s.type === 'record'),
+        longSent && JSON.stringify(longSent.params.message)
+      );
+      check('合成文本够长（不是一两个字）', (ttsCalls[0] || '').length >= 20, String((ttsCalls[0] || '').length));
+
+      // 对照：普通「发个语音」仍然用预置，省一次 TTS
+      const beforeCalls = ttsCalls.length;
+      llmStub.behavior = () => '[语音:晚安]';
+      await pushEvent(petWs, {
+        post_type: 'message', message_type: 'private', sub_type: 'friend',
+        user_id: 10001, message_id: 501, message: [{ type: 'text', data: { text: '发个语音' } }]
+      });
+      const shortSent = received.filter((r) => r.action === 'send_private_msg').pop();
+      check('普通语音仍走预置（不调合成）', ttsCalls.length === beforeCalls, `多调了 ${ttsCalls.length - beforeCalls} 次`);
+      check(
+        '普通语音发出 record 段',
+        shortSent && shortSent.params.message.some((s) => s.type === 'record'),
+        shortSent && JSON.stringify(shortSent.params.message)
+      );
+      _internals.setTtsImpl(null);
+      llmStub.behavior = origBehavior;
+
       /* ---------------- 群聊记忆 / 不插嘴 / 昵称标签 / 调教演进 ---------------- */
 
       // 用例 K：群聊消息都进记忆（含机器人没回的），带说话人标签

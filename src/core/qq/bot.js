@@ -415,6 +415,12 @@ function resolveMeme(token, items) {
   return hit.path;
 }
 
+// 对方明确要「长一点的语音 / 多说几句」——预置全是短句，这种必须现场合成整段
+const LONG_VOICE_RE =
+  /长(?:一点|点|一些)?的?(?:语音|话|说)|说长(?:一点|点|些)?|多说(?:几|两|三)句|语音(?:太|好)短|整段(?:说|念)|来(?:段|点)长的/;
+// 单纯要语音（不限长短）
+const VOICE_REQ_RE = /发(?:条|个)?语音|语音回|用语音|语音说|语音呢|说句话听听/;
+
 // 对方明确要表情包/图片，或者明显在斗图——模型没挑图时兜底发一张
 const PIC_WANT_RE =
   /发(?:个|张|点|些|几个|几张|一个|一张|一堆)?(?:表情|表情包|图|图片|梗图|图包|贴纸)|表情包呢|来张图|整点图|来点图|斗图|有没有(?:表情|图)/;
@@ -513,7 +519,9 @@ async function ttsToFile(text, cfg) {
   const llmCfg = config.getLLM();
   if (!llmCfg || !llmCfg.apiKey) throw new Error('没有配置模型服务');
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
+  // 长文本合成慢得多（实测 260 字要 15-20s，网络抖动时更久），固定 30s 会把长语音掐掉
+  const limitMs = Math.min(90000, 30000 + String(text || '').length * 300);
+  const timer = setTimeout(() => controller.abort(), limitMs);
   let res;
   try {
     res = await fetch(audioBase(llmCfg, '/audio/speech'), {
@@ -545,6 +553,12 @@ async function ttsToFile(text, cfg) {
   return file;
 }
 
+// 语音合成的实际出口。测试里可以换掉，免得真去调接口等 30 秒
+let ttsImpl = ttsToFile;
+function setTtsImpl(fn) {
+  ttsImpl = fn || ttsToFile;
+}
+
 async function generateReply({ history, incoming, imageUri, cfg, isGroup, addressed }) {
   const llmCfg = config.getLLM();
   if (!llmCfg || !llmCfg.enabled || !llmCfg.apiKey) {
@@ -567,6 +581,12 @@ async function generateReply({ history, incoming, imageUri, cfg, isGroup, addres
     }
     // 私聊不给对方名字：模型不需要知道对方叫什么
     user.push(`对方刚发来的消息：${incoming}\n\n请直接给出要回复的那句话。`);
+  }
+  // 对方要长语音时，得先有一段够长的话可念：这条临时压过「一两句话」的硬规矩
+  if (LONG_VOICE_RE.test(incoming)) {
+    user.push(
+      '补充：对方这次要你说长一点、多说几句。这条要求优先于「一两句话完事」——说 3-5 句、60-120 字，正常聊天口吻，别念稿、别总结、别分点。'
+    );
   }
   const userText = user.join('\n\n');
   // 表情清单和解析必须共用同一份数组，否则序号对不上
@@ -1008,18 +1028,26 @@ async function flushChat(qq) {
   }
 
   // 发语音的条件：对方发了语音 / 明确要语音 / 模型主动挑了预置语音 / 配置 voiceAlways。失败退回文字
-  const voiceReq = /发(条|个|个)?语音|语音回|用语音|语音说|语音呢|说句话听听/.test(incoming);
+  const wantLong = LONG_VOICE_RE.test(incoming);
+  const voiceReq = VOICE_REQ_RE.test(incoming) || wantLong;
   const wantVoice = !!getCfg().voiceReply && !!(presetVoice || voiceUrl || getCfg().voiceAlways || voiceReq);
+  // 预置片段全是短句：对方要「长一点的语音」、而且这次确实有够长的话可念，
+  // 才跳过预置现场合成；否则（模型只吐了个预置标记）还是用预置，别一句都发不出来
+  const longEnough = wantLong && String(reply || '').trim().length >= 8;
+  const usePreset = longEnough ? null : presetVoice;
   const sentIds = []; // 这次发出去的消息 id，别人引用回复时能认出「这是说我」
   let sentVoice = false;
-  if (client && wantVoice && (reply || presetVoice)) {
+  if (client && wantVoice && (reply || usePreset)) {
     try {
-      // 有预置片段就直接用（零 API 开销），没有才现场合成
-      const file = presetVoice || (await ttsToFile(reply, getCfg()));
+      const file = usePreset || (await ttsImpl(reply, getCfg()));
       const r = await client.sendRecord(isGroup, targetId, file);
       if (r && r.message_id) sentIds.push(Number(r.message_id));
       sentVoice = true;
-      dbg('[qq] 已发送语音 ->', name, presetVoice ? '(预置) ' + path.basename(presetVoice) : reply);
+      dbg(
+        '[qq] 已发送语音 ->',
+        name,
+        usePreset ? '(预置) ' + path.basename(usePreset) : `(现场合成 ${String(reply || '').length} 字)`
+      );
     } catch (err) {
       dbg('[qq]', name, '语音发送失败，退回文字：', err.message);
     }
@@ -1100,5 +1128,5 @@ module.exports = {
   shutdown,
   setNotifier,
   // 内部函数导出仅供测试
-  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile }
+  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile, setTtsImpl, LONG_VOICE_RE, VOICE_REQ_RE }
 };
