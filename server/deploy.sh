@@ -33,7 +33,12 @@ if [ -d "$APP_DIR/.git" ]; then
   say "更新代码 $APP_DIR"
   cd "$APP_DIR"
   git fetch --depth 1 origin main
-  git reset --hard origin/main
+  # 复位到 FETCH_HEAD，不要用 origin/main：
+  # `fetch --depth 1 origin main` 只写 FETCH_HEAD 这一个引用，浅仓库里
+  # 远端跟踪引用 refs/remotes/origin/main 不会跟着更新。用 origin/main
+  # 复位的结果是「每次都停在很久以前那个提交」，脚本还一路报告成功，
+  # 部署完以为上线了、实际跑的还是旧代码（2026-10-31 踩过一次）。
+  git reset --hard FETCH_HEAD
 else
   say "克隆到 $APP_DIR"
   mkdir -p "$(dirname "$APP_DIR")"
