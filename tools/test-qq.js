@@ -164,10 +164,12 @@ async function main() {
     });
   });
 
-  async function pushEvent(ws, ev) {
+  async function pushEvent(ws, ev, wait = 250) {
     ws.send(JSON.stringify(ev));
-    // 给主进程事件循环一点处理时间
-    await new Promise((r) => setTimeout(r, 250));
+    // 给主进程事件循环一点处理时间。
+    // 涉及配图/语音的用例要传大一点：配图是「先文字、后图片」分两条发，
+    // 中间隔着 900~1300ms，只等 250ms 会看不到那条图，甚至串到下个用例里。
+    await new Promise((r) => setTimeout(r, wait));
   }
 
   async function run(port) {
@@ -331,7 +333,7 @@ async function main() {
       await pushEvent(petWs, {
         post_type: 'message', message_type: 'private', sub_type: 'friend',
         user_id: 10001, message_id: 400, message: [{ type: 'text', data: { text: '无语住了' } }]
-      });
+      }, 1700);
       const imgSent = received.filter((r) => r.action === 'send_private_msg').pop();
       check(
         '配图回复发出图片段',
@@ -349,7 +351,7 @@ async function main() {
       await pushEvent(petWs, {
         post_type: 'message', message_type: 'private', sub_type: 'friend',
         user_id: 10001, message_id: 401, message: [{ type: 'text', data: { text: '再来一张' } }]
-      });
+      }, 1700);
       const idxSent = received.filter((r) => r.action === 'send_private_msg').pop();
       check(
         '序号标记能发图',
@@ -362,7 +364,7 @@ async function main() {
       await pushEvent(petWs, {
         post_type: 'message', message_type: 'private', sub_type: 'friend',
         user_id: 10001, message_id: 402, message: [{ type: 'text', data: { text: '发个表情包' } }]
-      });
+      }, 1700);
       const fbSent = received.filter((r) => r.action === 'send_private_msg').pop();
       check(
         '要表情包时兜底发图',
@@ -396,7 +398,7 @@ async function main() {
       await pushEvent(petWs, {
         post_type: 'message', message_type: 'private', sub_type: 'friend',
         user_id: 10001, message_id: 500, message: [{ type: 'text', data: { text: '再发个长一点的语音' } }]
-      });
+      }, 1700);
       const longSent = received.filter((r) => r.action === 'send_private_msg').pop();
       check('长语音走现场合成（不用短预置）', ttsCalls.length === 1, `tts 调用 ${ttsCalls.length} 次`);
       check(
@@ -412,7 +414,7 @@ async function main() {
       await pushEvent(petWs, {
         post_type: 'message', message_type: 'private', sub_type: 'friend',
         user_id: 10001, message_id: 501, message: [{ type: 'text', data: { text: '发个语音' } }]
-      });
+      }, 1700);
       const shortSent = received.filter((r) => r.action === 'send_private_msg').pop();
       check('普通语音仍走预置（不调合成）', ttsCalls.length === beforeCalls, `多调了 ${ttsCalls.length - beforeCalls} 次`);
       check(
@@ -426,7 +428,7 @@ async function main() {
       await pushEvent(petWs, {
         post_type: 'message', message_type: 'private', sub_type: 'friend',
         user_id: 10001, message_id: 502, message: [{ type: 'text', data: { text: '随便说点什么' } }]
-      });
+      }, 1700);
       const customSent = received.filter((r) => r.action === 'send_private_msg').pop();
       check('清单外语音也现场合成', ttsCalls.length === beforeCustom + 1, `tts 调用 ${ttsCalls.length - beforeCustom} 次`);
       check('合成的是模型写的那句', ttsCalls[beforeCustom] === '今天风好大啊', String(ttsCalls[beforeCustom]));
