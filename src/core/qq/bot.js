@@ -171,6 +171,10 @@ const BUBBLE_MAX = 3; // 一次最多三条，多了像刷屏
 const BUBBLE_MAX_CHARS = 60; // 单条上限（长语音场景底下另有放宽）
 const BUBBLE_GAP_MS = [350, 900]; // 两条之间的间隔，模拟打字的停顿
 const CTX_PER_CHAT = 6; // 每会话保留的上下文条数（一问一答算两条）
+// 真正喂给模型的上下文条数。ctx 那 6 条是「上一轮说了什么」的兜底，
+// 长聊/重启后基本是空的；归档文件里是全量，取最近十几条才够用。
+const CTX_FROM_ARCHIVE = 16;
+
 const MEMORY_LIMIT_DEFAULT = 120; // 每个群保留的聊天记录条数
 const MEMORY_CONTEXT_DEFAULT = 24; // 每次喂给模型多少条群聊记录
 const CLEAN_PREFIX = ['回复：', '回复:', '可以这样回：'];
@@ -1165,7 +1169,11 @@ async function flushChat(qq) {
     }
   }
 
-  const ctx = (chatState(qq).ctx || []).slice(-CTX_PER_CHAT);
+  // 上下文优先从归档文件取（全量、重启不丢）；取不到才退回 state 里那 6 条。
+  // 群聊不走这条：群聊有自己的整段 memory，混进归档反而把两个群的记录搅在一起。
+  const stateCtx = (chatState(qq).ctx || []).slice(-CTX_PER_CHAT);
+  const arcCtx = isGroup ? [] : ctxFromArchive(qq, incoming, CTX_FROM_ARCHIVE);
+  const ctx = arcCtx.length ? arcCtx : stateCtx;
   // 群聊用整段记忆当上下文（里面已经包含刚发的这几条），私聊用短 ctx
   const history = isGroup ? memoryText(qq, cfg.memoryContext) : ctx;
   // 自己最近说过的原话：频率惩罚管不到跨请求的复读，只能点名禁掉
@@ -1374,6 +1382,35 @@ function proactiveTargets(cfg) {
     }
   }
   return out;
+}
+
+/**
+ * 从归档文件里取这个会话最近 N 条，当成给模型的上下文。
+ *
+ * 为什么要这个：state 里的 ctx 只留 CTX_PER_CHAT(6) 条，聊三四句就滚没了，
+ * 进程一重启更是直接清零——模型于是只看到「快点」「发呀」这种孤零零一句，
+ * 回一句「没看懂」几乎是必然。归档是 JSONL 全量落盘（收消息时就写，见
+ * onMessage 开头），按会话号取尾部就是完整上文，重启也不丢。
+ *
+ * 细节：收消息时就归档了，所以最后一条往往正是当前这句，得剔掉，
+ * 否则模型看到「对方：快点」出现两遍。
+ */
+function ctxFromArchive(qq, incoming, n) {
+  try {
+    const sinceSec = Math.floor(Date.now() / 1000) - 3 * 86400;
+    const rows = archive.query({ who: String(qq), since: sinceSec, limit: (n || CTX_FROM_ARCHIVE) + 3 });
+    const lines = [];
+    for (const r of rows) {
+      const body = r.x || (r.k && r.k !== 'text' ? `（发了个${r.k}）` : '');
+      if (!body) continue;
+      lines.push(`${r.me ? '我' : '对方'}：${String(body).replace(/\n/g, '；')}`);
+    }
+    const self = `对方：${String(incoming || '').replace(/\n/g, '；')}`;
+    while (lines.length && lines[lines.length - 1] === self) lines.pop();
+    return lines.slice(-(n || CTX_FROM_ARCHIVE));
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -1599,5 +1636,5 @@ module.exports = {
   shutdown,
   setNotifier,
   // 内部函数导出仅供测试
-  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, bubblesOf, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile, setTtsImpl, generateReply, LONG_VOICE_RE, VOICE_REQ_RE, VOICE_SAY_MAX, looksLikeQuestion, proactiveCfg, proactiveTargets, proactiveTick, sendProactive, generateProactiveText, startProactiveTimer, stopProactiveTimer, historyDigest, proactive }
+  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, bubblesOf, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile, setTtsImpl, generateReply, LONG_VOICE_RE, VOICE_REQ_RE, VOICE_SAY_MAX, looksLikeQuestion, proactiveCfg, proactiveTargets, proactiveTick, sendProactive, generateProactiveText, startProactiveTimer, stopProactiveTimer, historyDigest, ctxFromArchive, proactive }
 };
