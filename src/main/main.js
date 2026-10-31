@@ -6,6 +6,7 @@ const { app, ipcMain, shell, screen } = require('electron');
 const config = require('../core/config');
 const agent = require('../core/agent');
 const reminder = require('../core/tools/reminder');
+const memory = require('../core/tools/memory');
 const windows = require('./windows');
 const wander = require('./wander');
 const { createTray, refreshTray } = require('./tray');
@@ -343,6 +344,13 @@ app.whenReady().then(() => {
   // 不拉 NapCat、不拉微信客户端、不连 OneBot WS、不刷值守状态，也没有微信看门狗。
   // 同一时间只允许一边值守——本地再起一套会和服务器抢同一个号、重复回复、主动消息双发。
   // 想临时回退到本地：把 server 上 qqbot 容器停掉，再按 git 历史恢复这里的接线。
+
+  // 聊天归档预热：服务器上的 .data/archive 拉到本地，之后「问上周跟谁聊了啥」
+  // 走本地文件（毫秒级），不用每次等 SSH 往返。拉失败不打扰用户，查询时会再试。
+  memory
+    .sync()
+    .then((r) => dbg('[memory] 归档预热:', JSON.stringify(r)))
+    .catch((err) => dbg('[memory] 归档预热失败:', err.message));
 
   // 恢复未到期的提醒
   dbg('[reminder] init 读取到', reminder.list().length, '条待办');

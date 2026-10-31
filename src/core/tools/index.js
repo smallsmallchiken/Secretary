@@ -5,6 +5,7 @@ const media = require('./media');
 const system = require('./system');
 const reminder = require('./reminder');
 const wechat = require('./wechat');
+const memory = require('./memory');
 const config = require('../config');
 
 /**
@@ -209,6 +210,50 @@ const TOOLS = [
     },
     async run({ content, target }) {
       return wechat.prepare(content, { target });
+    }
+  },
+  {
+    name: 'remember',
+    label: '记一件事',
+    description:
+      '用户让你记住某件事的时候用。比如「记一下周五要交稿」「帮我记住我妈生日是三月十二」「别忘了明天带硬盘」。' +
+      '只记用户明确交代要记的东西，聊天里的随口一句不要擅自存。',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: '要记的内容，用用户的原话或更精炼的一句话' },
+        tags: { type: 'string', description: '标签，可选，多个用逗号分隔，比如「工作」「家里」' }
+      },
+      required: ['text']
+    },
+    async run({ text, tags }) {
+      return memory.remember(text, tags);
+    }
+  },
+  {
+    name: 'recall',
+    label: '查记事和聊天记录',
+    description:
+      '用户问「我之前跟你说过什么」「我让你记的那件事是啥」「上周跟谁聊了啥」「我这几天有什么事」的时候用。' +
+      '会同时查两处：用户让你记的事（记事本），和 QQ 上自动存下来的聊天记录。',
+    parameters: {
+      type: 'object',
+      properties: {
+        q: { type: 'string', description: '关键词，比如「交稿」「设计稿」。不填就是按时间倒着看最近的' },
+        scope: {
+          type: 'string',
+          enum: ['all', 'notes', 'chat', 'stats'],
+          description: 'all=两边都查（默认）；notes=只查记事本；chat=只查聊天记录；stats=只看归档有多少条'
+        },
+        who: { type: 'string', description: '聊天对象的昵称或 QQ 号，比如「G」' },
+        from: { type: 'string', description: '起始日期，YYYY-MM-DD，或者「7天前」这种说法' },
+        to: { type: 'string', description: '截止日期，YYYY-MM-DD' },
+        limit: { type: 'number', description: '最多返回几条，默认 30' }
+      }
+    },
+    async run(args) {
+      if ((args.scope || '') === 'stats') return memory.stats();
+      return memory.recall(args);
     }
   }
 ];
