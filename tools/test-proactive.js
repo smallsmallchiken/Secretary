@@ -103,11 +103,12 @@ check(
 );
 check(
   '每日上限到了不发',
+  // 用 DEFAULTS.dailyMax 而不是写死 2：上限调过几次，写死会让这条断言慢慢失真
   proactive.dueReason({
     chat: chat({
       lastIncomingAt: NOW - 40 * HOUR,
       lastOutgoingAt: NOW - 40 * HOUR,
-      proactiveDay: { day: '2026-10-31', n: 2 }
+      proactiveDay: { day: '2026-10-31', n: proactive.DEFAULTS.dailyMax }
     }),
     cfg: baseCfg,
     now: NOW
@@ -243,6 +244,64 @@ check(
     key: '999',
     rnd: () => 0.1
   }) === null
+);
+
+console.log('== 决策：旧事回访 ==');
+
+// 这一路的「由头」不在决策层：调用方从归档里抠出前几天聊过的事喂给模型，
+// 这里只判断时间上该不该开口，所以多一个 revisit 入参。
+check(
+  '归档里有旧话题 + 隔了 4 小时 → 回访',
+  (() => {
+    const r = proactive.dueReason({ chat: chat(), cfg: baseCfg, now: NOW, key: '777', revisit: true });
+    return r && r.reason === 'revisit';
+  })()
+);
+check(
+  '归档里没货（revisit=false）→ 不编由头',
+  (() => {
+    const r = proactive.dueReason({ chat: chat(), cfg: baseCfg, now: NOW, key: '777', revisit: false });
+    return !r || r.reason !== 'revisit';
+  })()
+);
+check(
+  '刚聊完 1 小时就翻旧账太拧巴 → 不回访',
+  (() => {
+    const r = proactive.dueReason({
+      chat: chat({ lastIncomingAt: NOW - HOUR, lastOutgoingAt: NOW - HOUR }),
+      cfg: baseCfg,
+      now: NOW,
+      key: '777',
+      revisit: true
+    });
+    return !r || r.reason !== 'revisit';
+  })()
+);
+check(
+  '回访冷却期内（2 小时前才回访过）不重复问同一件事',
+  (() => {
+    const r = proactive.dueReason({
+      chat: chat({ lastRevisitAt: NOW - 2 * HOUR }),
+      cfg: baseCfg,
+      now: NOW,
+      key: '777',
+      revisit: true
+    });
+    return !r || r.reason !== 'revisit';
+  })()
+);
+check(
+  '回访也受每日上限管着',
+  (() => {
+    const r = proactive.dueReason({
+      chat: chat({ proactiveDay: { day: '2026-10-31', n: proactive.DEFAULTS.dailyMax } }),
+      cfg: baseCfg,
+      now: NOW,
+      key: '777',
+      revisit: true
+    });
+    return r === null;
+  })()
 );
 
 console.log('== 决策：优先级 ==');

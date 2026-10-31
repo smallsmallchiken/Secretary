@@ -28,20 +28,25 @@ const DEFAULTS = {
   tzOffsetMinutes: 480, // 北京时间
   quietHours: [1, 8], // 这个区间一条都不发（跨天可写 [23, 8]）
   activeWindow: [9, 23], // 随机关怀只在这个区间里挑时间
-  dailyMax: 2, // 每个会话每天最多主动几条
-  cooldownMinutes: 240, // 两次主动之间至少隔多久
+  // 一天 4 条：旧版是 2 条，实测中午就打满额度、之后 9 小时一句话不说，
+  // 用户体感是「根本不会主动」。4 条配合下面的冷却，一天里能散在早中晚几个点上。
+  dailyMax: 4,
+  cooldownMinutes: 75, // 两次主动之间至少隔多久（旧版 240 分钟，一天顶多 2 轮）
   maxUnanswered: 2, // 连续这么多条主动都没回就停，等他先开口；0 = 不限
   minGapMinutes: 20, // 对方刚说完话这么多分钟内不插嘴（可能还在打字）
   activeDays: 14, // 超过这么多天没互动的人不再主动找（关系已经凉了）
   followUpMinutes: [40, 90], // 我上一条问句没回 → 在这个区间里追一句
   followUpMaxHours: 6, // 超过这么久就别追了，追了像讨债
-  silenceHours: [20, 34], // 距上次说话这么久 → 空闲唤醒
-  slots: ['12:40', '22:40'], // 定时问候时刻（会前后抖动）
-  slotJitterMinutes: 25,
-  slotWindowMinutes: 12, // 到点后这么多分钟内算有效，错过就算了（不补发）
-  randomDaily: 1, // 随机关怀每天最多几条
-  randomChance: 0.35, // 每次掷骰子的命中率
-  randomRollMinutes: 60 // 掷骰子的最小间隔
+  silenceHours: [7, 15], // 距上次说话这么久 → 空闲唤醒（旧版 20~34 小时，一天半才响）
+  // 旧事回访：翻归档看到前几天聊过的事，隔几个小时想起来问一句
+  revisitMinGapHours: 3, // 距上次说话至少这么久才回访（刚聊完就回访很拧巴）
+  revisitCooldownHours: 18, // 两次回访之间至少隔这么久，免得天天问同一件事
+  slots: ['09:40', '14:20', '21:30'], // 定时问候时刻（会前后抖动）
+  slotJitterMinutes: 20,
+  slotWindowMinutes: 15, // 到点后这么多分钟内算有效，错过就算了（不补发）
+  randomDaily: 2, // 随机关怀每天最多几条
+  randomChance: 0.5, // 每次掷骰子的命中率
+  randomRollMinutes: 50 // 掷骰子的最小间隔
 };
 
 const MIN = 60000;
@@ -122,14 +127,17 @@ function dailyCount(chat, day) {
  *
  * @param {object} o
  * @param {object} o.chat   会话状态（lastIncomingAt / lastOutgoingAt / lastProactiveAt /
- *                          awaitingReply / proactiveUnanswered / proactiveDay / slotFired）
+ *                          awaitingReply / proactiveUnanswered / proactiveDay / slotFired /
+ *                          lastRevisitAt）
  * @param {object} o.cfg    proactive 配置（缺项走 DEFAULTS）
  * @param {number} o.now    当前时间戳
  * @param {string} o.key    会话键（QQ 号），用于抖动种子
  * @param {function} o.rnd  0-1 随机数，测试可注入
+ * @param {boolean} o.revisit 归档里有没有值得回访的旧话题——由调用方查文件算出来，
+ *                            本模块不碰 IO。true 才有「旧事回访」这一路。
  * @returns {null|{reason, reasonText, prob, slot?, day?}}
  */
-function dueReason({ chat, cfg, now, key, rnd }) {
+function dueReason({ chat, cfg, now, key, rnd, revisit }) {
   const p = { ...DEFAULTS, ...(cfg || {}) };
   if (p.enabled === false) return null;
 
@@ -167,7 +175,22 @@ function dueReason({ chat, cfg, now, key, rnd }) {
     }
   }
 
-  // 2) 定时问候：到点了，但每个 slot 一天只发一次
+  // 2) 旧事回访：前几天的对话里有事没说完，隔了几个小时自己想起来问一句。
+  //    这一路的«由头»不写在这里——真正的话题由调用方从聊天归档里取出来喂给模型，
+  //    这里只判断「时间上该不该开口」。所以它排在有具体由头的追问之后。
+  if (revisit && unanswered === 0) {
+    const minGap = (p.revisitMinGapHours || 3) * HOUR;
+    const cool = (p.revisitCooldownHours || 18) * HOUR;
+    if (now - lastAct >= minGap && now - (c.lastRevisitAt || 0) >= cool) {
+      return {
+        reason: 'revisit',
+        prob: 1,
+        reasonText: '你突然想起前阵子聊过的一件事，想知道后来怎么样了。'
+      };
+    }
+  }
+
+  // 3) 定时问候：到点了，但每个 slot 一天只发一次
   for (const raw of p.slots || []) {
     const base = parseSlot(raw);
     if (base === null) continue;
@@ -187,7 +210,7 @@ function dueReason({ chat, cfg, now, key, rnd }) {
     }
   }
 
-  // 3) 空闲唤醒：安静太久了，主动找个由头
+  // 4) 空闲唤醒：安静太久了，主动找个由头
   if (unanswered === 0) {
     const [a, b] = p.silenceHours || [20, 34];
     const span = Math.max(0, b - a) * HOUR;
@@ -202,7 +225,7 @@ function dueReason({ chat, cfg, now, key, rnd }) {
     }
   }
 
-  // 4) 随机关怀：唯一真掷骰子的一路，且一小时最多掷一次
+  // 5) 随机关怀：唯一真掷骰子的一路，且一小时最多掷一次
   if (unanswered === 0 && (p.randomDaily || 0) > 0) {
     if (inRange(t.minutes, p.activeWindow || [9, 23])) {
       if (now - (c.randomRollAt || 0) >= (p.randomRollMinutes || 60) * MIN) {

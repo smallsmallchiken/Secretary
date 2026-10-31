@@ -83,15 +83,23 @@ ${opts.voiceList.trim()}
   // 主动开口：不是回复，是你自己想说话。规矩和回复不完全一样，所以单独一段覆盖
   const proactiveBlock = opts.proactive
     ? `\n\n===== 这一次是你主动开口 =====
-对方没发消息，是你自己想找他说话。
+对方没发消息，是你自己想找他说话。这不是回复，什么都还没发生。
 为什么现在开口：${opts.proactive.reasonText || '突然想起他'}
 怎么说：
 - 就一条，最多两条；一条别超过 12 个字，别写长句
-- 得有具体由头：上次聊到的事、现在这个点你在干嘛、手头正在弄的东西。别用「在吗」「干嘛呢」这种空话开头
+- 必须说一件**具体**的事，不能是招呼。从下面给你的聊天记录里挑一件接着聊
+  （问后来怎么样了、说说你自己那边、或者吐槽同一件事）；
+  实在挑不到就说你手上正在干嘛，具体到东西上
+- 这些空招呼一律不许当开头：在吗 / 干嘛呢 / 吃了没 / 睡了吗 / 早上好 / 在忙吗 / 有空吗 / 最近咋样
 - 别解释你为什么突然说话，别提「好久没聊了」「有点想你」这类话
 - 别用「喏」「给」「拿去」这种指代东西的说法（除非这条真的配了图）
 - 说完就停，别自问自答，也别连着追问
 - 这次必须开口，没什么事也说一句，不要输出 [SKIP]
+
+主动开口的好和坏（注意：这不是回话）：
+✗ 在吗 / 干嘛呢 / 醒了吗 / 吃饭了没 / 今天过得怎么样 / 在忙吗
+✓ 第八版交了没 / 你那稿子过了吗 / 我又改到第三稿了
+✓ 刚醒 眼睛疼 / 楼下在施工 吵死了 / 昨天那事你想咋办
 `
     : '';
   return `你在 QQ 上替「我」回消息。${personaLine}。这些字会直接发出去，对方不知道有第三者在写。
@@ -274,6 +282,7 @@ function chatState(qq) {
       awaitingReply: false,
       lastProactiveAt: 0,
       lastProactiveAttemptAt: 0,
+      lastRevisitAt: 0,
       proactiveUnanswered: 0,
       proactiveDay: null,
       slotFired: {},
@@ -1334,6 +1343,7 @@ const PROACTIVE_TICK_MS = 60 * 1000;
 const PROACTIVE_RETRY_MS = 10 * 60 * 1000;
 const REASON_LABEL = {
   followUp: '接着上次问的',
+  revisit: '翻到旧事想起来',
   timed: '到点打个招呼',
   silence: '安静太久',
   random: '突然想起他'
@@ -1360,8 +1370,48 @@ function proactiveTargets(cfg) {
   return out;
 }
 
+/**
+ * 从归档里捞这个会话最近几天的对话，压成一段「话头材料」。
+ *
+ * 为什么要这个：主动开口最容易犯的毛病是没话找话——「醒了吗」「吃了吗」发一百遍
+ * 也没人想接。有了归档才有真材料：「你前几天说设计稿要改到第八版，交了没」才是人话，
+ * 这才是用户说的「自己提话题」。
+ *
+ * 只压缩不摘要：模型自己会挑重点，这里只负责把噪音和字数压住。
+ *   丢掉纯表情/纯图/一两个字的感叹，太长的一行截断，按时间正序给最近 24 条。
+ */
+function historyDigest(qq, opts = {}) {
+  try {
+    const maxDays = opts.maxDays || 5;
+    const limit = opts.limit || 24;
+    const sinceSec = Math.floor((Date.now() - maxDays * 86400000) / 1000);
+    // query 的 who 是「包含匹配」（qq 号可能互为子串），这里再精确过滤一次。
+    // limit 传 0 拿全集再自己切尾部：要的是「最近的」，让 query 提前截断会切掉在中间的日子。
+    const rows = archive
+      .query({ who: String(qq), since: sinceSec, limit: 0 })
+      .filter((r) => String(r.id) === String(qq))
+      .slice(-limit);
+    const lines = [];
+    for (const r of rows) {
+      let body = String(r.x || '').replace(/\s+/g, ' ').trim();
+      if (r.k && r.k !== 'text') {
+        const tag = r.k === 'image' ? '图片' : r.k === 'record' ? '语音' : '表情';
+        body = `[${tag}] ${body}`.trim();
+      }
+      // 去掉标记后不到 2 个字，基本就是「哦」「哈」这种，当话头没意义
+      if (body.replace(/\[[^\]]*\]/g, '').trim().length < 2) continue;
+      if (body.length > 40) body = `${body.slice(0, 40)}…`;
+      lines.push(`${archive.fmtTime(r.t)} ${r.me ? '我' : '对方'}: ${body}`);
+    }
+    return lines;
+  } catch (err) {
+    dbg('[qq] 读归档取话头失败（不影响发送）：', err.message);
+    return [];
+  }
+}
+
 /** 生成一句主动要说的话。和回复共用同一套人设/表情清单，只是换了「为什么开口」 */
-async function generateProactiveText({ ctx, reasonText, cfg, p, now }) {
+async function generateProactiveText({ ctx, reasonText, cfg, p, now, history }) {
   const llmCfg = config.getLLM();
   if (!llmCfg || !llmCfg.enabled || !llmCfg.apiKey) return { text: null, memePath: null, error: '没有配置模型' };
   const t = proactive.clockOf(now, p.tzOffsetMinutes || 0);
@@ -1372,7 +1422,13 @@ async function generateProactiveText({ ctx, reasonText, cfg, p, now }) {
     .filter((x) => x && !x.includes('（'))
     .slice(-4);
   const user = [];
-  if (ctx.length) user.push(`最近的聊天记录：\n${ctx.join('\n')}`);
+  // 先给几天的旧账，再给刚才那几句：有旧事可提的时候，模型才不会抓着「刚才」硬聊
+  if (history && history.length) {
+    user.push(
+      `你们前些天聊过这些（从聊天记录里翻出来的，可以从里面挑一件接下去）：\n${history.join('\n')}`
+    );
+  }
+  if (ctx.length) user.push(`刚才最后几句：\n${ctx.join('\n')}`);
   user.push(`现在是${t.dow} ${t.hhmm}。`);
   user.push('请主动发一条消息。');
   const msg = await llm.chat({
@@ -1399,12 +1455,12 @@ async function generateProactiveText({ ctx, reasonText, cfg, p, now }) {
 }
 
 /** 真的发出去 + 记账（记账必须在发成功之后，发不出去不算数） */
-async function sendProactive(qq, due, now, name) {
+async function sendProactive(qq, due, now, name, history) {
   const cfg = getCfg();
   const p = proactiveCfg();
   const cs = chatState(qq);
   const ctx = (cs.ctx || []).slice(-CTX_PER_CHAT);
-  const gen = await generateProactiveText({ ctx, reasonText: due.reasonText, cfg, p, now });
+  const gen = await generateProactiveText({ ctx, reasonText: due.reasonText, cfg, p, now, history });
   if (!gen.text && !gen.memePath) {
     dbg('[qq] 主动消息没生成出内容：', gen.error || '模型输出为空/被判 SKIP');
     return null;
@@ -1443,6 +1499,7 @@ async function sendProactive(qq, due, now, name) {
   if (due.reason === 'timed' && due.slot) {
     cs.slotFired = { ...(cs.slotFired || {}), [due.slot]: due.day || t.day };
   }
+  if (due.reason === 'revisit') cs.lastRevisitAt = now;
   cs.sentMsgIds = [...(cs.sentMsgIds || []), ...sentIds].slice(-10);
   cs.ctx = [...ctx, `我：${plain}`].slice(-CTX_PER_CHAT);
   saveState();
@@ -1461,7 +1518,10 @@ async function proactiveTick(now = Date.now()) {
   for (const [qq, name] of proactiveTargets(cfg)) {
     const cs = chatState(qq);
     if (now - (cs.lastProactiveAttemptAt || 0) < PROACTIVE_RETRY_MS) continue;
-    const due = proactive.dueReason({ chat: cs, cfg: p, now, key: qq });
+    // 归档里有几句像样的对话，才谈得上「旧事回访」；太少说明刚认识，硬提会尴尬。
+    // 不管走哪一路，history 都当材料喂进去——有旧账可翻时，模型才不会抓着「刚才」硬聊。
+    const history = historyDigest(qq);
+    const due = proactive.dueReason({ chat: cs, cfg: p, now, key: qq, revisit: history.length >= 4 });
     if (!due) continue;
     if (due.reason === 'random' && due.rolled === false) {
       // 骰子掷了没中：记下来，一小时后再掷，不然 60 秒一跳等于必经中
@@ -1472,7 +1532,7 @@ async function proactiveTick(now = Date.now()) {
     cs.lastProactiveAttemptAt = now;
     saveState();
     try {
-      const text = await sendProactive(qq, due, now, name);
+      const text = await sendProactive(qq, due, now, name, history);
       if (text) done.push({ qq, name, reason: due.reason, text });
     } catch (err) {
       dbg('[qq] 主动消息失败：', name, err.message);
@@ -1532,5 +1592,5 @@ module.exports = {
   shutdown,
   setNotifier,
   // 内部函数导出仅供测试
-  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, bubblesOf, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile, setTtsImpl, generateReply, LONG_VOICE_RE, VOICE_REQ_RE, VOICE_SAY_MAX, looksLikeQuestion, proactiveCfg, proactiveTargets, proactiveTick, sendProactive, startProactiveTimer, stopProactiveTimer, proactive }
+  _internals: { getCfg, guardCheck, guardRecord, isDuplicate, normalize, cleanReply, bubblesOf, matchWhitelist, loadState, chatState, saveState, resetState: () => { state = null; }, buildSystemPrompt, PERSONA_DEFAULT, collectMeme, memeListText, memeFile, picPromptList, resolveMeme, media, ttsToFile, setTtsImpl, generateReply, LONG_VOICE_RE, VOICE_REQ_RE, VOICE_SAY_MAX, looksLikeQuestion, proactiveCfg, proactiveTargets, proactiveTick, sendProactive, generateProactiveText, startProactiveTimer, stopProactiveTimer, historyDigest, proactive }
 };
