@@ -32,6 +32,39 @@ Windows 桌面宠（Electron），带可被 LLM 调用的工具层。核心是"�
 - 服务器上是完整 QQ 机器人（NapCat + OneBot WS + 主动消息调度），细节见 `server/README.md`；
   服务器上 NapCat 的坑（配置匿名卷、安全组、扫码）见 `.workbuddy/memory/2026-10-30.md`。
 
+## 聊天归档与记事（`remember` / `recall`）
+
+用户要「帮我记事，后面我直接问就行」，所以有两条数据线，**存法不同、用途不同**：
+
+| 数据 | 存在哪 | 谁写 | 查什么用 |
+|---|---|---|---|
+| QQ 聊天流水 | 服务器 `.data/archive/YYYY-MM-DD.jsonl` | `src/core/qq/bot.js` 收到消息时（**在白名单过滤之前**，所有人都记） | 「上周跟 G 聊了啥」 |
+| 记事本 | 本地 `.data/notes.jsonl` | 用户说「记一下 xxx」→ `remember` 工具 | 「我让你记的那件事」 |
+
+**先说清楚能读到什么**：服务器上**没有**完整历史。NapCat 只是个转发器，它自带的
+`nt_msg.db` 是加密的、而且只存这号登录（10-30）之后的消息；微信容器里根本没有数据库
+（只有 14 MB 配置缓存）。腾讯那边的漫游记录 NapCat 也翻不到——实测 `get_friend_msg_history`
+给 count=10/50/100/500 都只回同样 34 条，拿最早那条的 seq 往前翻直接「消息不存在」。
+所以归档是**从现在开始攒**，不是「下载历史」。
+
+桌宠查归档的路径（`src/core/tools/memory.js`）：
+
+```
+recall → 先查本地 .data/archive（archive.query，37ms）
+       → 查不到就 tools/sync-archive.py 同步一次再查
+       → 还不中才 tools/remote-chatlog.py SSH 过去实时查（约 6 秒，只做兜底）
+```
+
+- 同步用 SFTP，增量（远端文件只会变大，本地不小于远端就跳过）。
+- **远端路径必须 `posixpath.join`**：Windows 上 `os.path.join` 会拼出反斜杠，SFTP 找不到文件。
+- 启动时预热一次（`main.js`），之后每次查询超过 10 分钟就**后台**刷一次（不 await，
+  否则又把毫秒级查询拖成 5 秒）。
+- 服务器配置在 `.data/config.json` 的 `server` 段（host/user/password，已 gitignore）。
+
+改归档格式时两边都要动：`src/core/qq/archive.js` 是唯一的读写实现，
+`tools/qq-archive.js`（服务器查）和 `tools/remote-chatlog.py`（渲染）都跟着它的字段走。
+
+
 ## 启动
 
 ```bash
