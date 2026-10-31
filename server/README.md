@@ -59,25 +59,40 @@ bash /opt/secretary/server/deploy.sh --no-restart # 只更新代码
 不只是被动回复：它会自己找由头开口。调度器在 `src/core/qq/proactive.js`（纯决策）+ `bot.js`
 的 `proactiveTick()`（生成和发送），每 60 秒走一轮，只对**私聊**（白名单 / allFriends 里打过交道的人）生效。
 
-四路触发，按固定优先级判定，先命中先算：
+五路触发，按固定优先级判定，先命中先算：
 
 | 触发 | 什么时候 | 默认参数 |
 |---|---|---|
 | `followUp` 话题追问 | 我上一条是问句、对方没回 | 40–90 分钟后、最多追到 6 小时 |
-| `timed` 定时问候 | 到点随口打个招呼 | `12:40`、`22:40`，前后抖 25 分钟，每个槽一天一次 |
-| `silence` 空闲唤醒 | 安静太久了找个话头 | 距上次说话 20–34 小时（按会话抖动） |
-| `random` 随机关怀 | 突然想起他 | 每天 1 条、每小时掷一次骰子、命中率 0.35 |
+| `revisit` 旧事回访 | 翻聊天归档看到前些天聊过的事，隔几小时接一句 | 距上次说话 ≥3 小时、两次回访隔 18 小时 |
+| `timed` 定时问候 | 到点随口打个招呼 | `09:40`、`14:20`、`21:30`，前后抖 20 分钟，每槽一天一次 |
+| `silence` 空闲唤醒 | 安静太久了找个话头 | 距上次说话 7–15 小时（按会话抖动） |
+| `random` 随机关怀 | 突然想起他 | 每天 2 条、每 50 分钟掷一次骰子、命中率 0.5 |
+
+**开口必须有具体的事**，这是这块最容易做砸的地方。`revisit` 和别的几路不同：它的由头不在
+决策层，而是 `bot.js` 的 `historyDigest()` 从 `.data/archive/` 里捞出该会话最近 5 天的对话
+（压掉纯表情和超短感叹，最多 24 行）喂给模型，模型从里面挑一件接下去。所以：
+
+- 归档里少于 4 条时 `revisit` 不触发（刚认识的人硬提旧事很尴尬），只剩定时/空闲/随机三路
+- **归档是空的，主动消息就退化成「到点打个招呼」**，质量会明显掉——归档是这块的地基
 
 闸门（任何一个不满足就不发）：
 
 - `quietHours` 免打扰，默认北京时间 **1:00–8:00** 一条不发
-- `dailyMax` 每人每天最多 2 条；`cooldownMinutes` 两次之间至少隔 4 小时
+- `dailyMax` 每人每天最多 4 条；`cooldownMinutes` 两次之间至少隔 75 分钟
 - `maxUnanswered` 连着 2 条主动都没回就**彻底闭嘴**，等他先开口（对方一发消息立刻清零）
 - `minGapMinutes` 对方刚说完 20 分钟内不插嘴；`activeDays` 超过 14 天没互动的人不找
 - 生成失败/发送失败记 `lastProactiveAttemptAt`，10 分钟内不重试，避免白烧模型钱
 
+> 额度这块踩过坑：早期 `dailyMax=2` + `cooldownMinutes=240`，实测中午就把两条用完，
+> 之后 9 小时一条不发，体感是「根本不会主动」。放宽到 4 条 / 75 分钟后才散得开。
+> 但也别无限放宽——`maxUnanswered` 那个护栏一定要留着，它防的是「追命连环问」。
+
 调参直接改 `/opt/secretary/.data/config.json` 的 `qq.proactive`，改完 `docker restart qqbot`
-（配置在内存里缓存，不重启不生效）。
+（配置在内存里缓存，不重启不生效）。**注意 `proactive` 整段是覆盖关系**：
+写了 `dailyMax` 之外没写的键会走代码默认（`{...DEFAULTS, ...config}`），
+但如果这里存着一份**旧的完整配置**，它会整个盖住代码里新调的默认值——
+所以调过默认值之后，记得把服务器上这份旧配置清成 `null`。
 
 ```bash
 # 验证：临时把一个 slot 设到两三分钟后，看日志里有没有「主动找 xxx 说了句」
@@ -86,8 +101,8 @@ grep "主动消息 ->" /opt/secretary/.data/debug.log | tail
 ```
 
 注意：`qq-state.json` 里每个会话会记 `lastIncomingAt / lastOutgoingAt / awaitingReply /
-lastProactiveAt / proactiveDay / slotFired`。老状态没有这些字段时，会用 `lastSentAt` 倒推对话结束时间，
-不然上线后要好几天才满足「必须聊过才主动」。
+lastProactiveAt / lastRevisitAt / proactiveDay / slotFired`。老状态没有这些字段时，
+会用 `lastSentAt` 倒推对话结束时间，不然上线后要好几天才满足「必须聊过才主动」。
 
 **别在两个进程里同时开 QQ 值守**（本地桌宠 + 服务器容器）：回复会重复，主动消息也会双发。
 
