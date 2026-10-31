@@ -8,6 +8,7 @@ const { dbg } = require('../debug');
 const media = require('../media/library');
 const { dataDir } = require('../paths');
 const { OneBotClient } = require('./client');
+const archive = require('./archive');
 const proactive = require('./proactive');
 
 /**
@@ -427,6 +428,26 @@ function bubblesOf(text) {
     .split('||')
     .map((x) => x.trim())
     .filter(Boolean);
+}
+
+/** 归档一条我自己发出去的消息。会话名带上，查的时候能按人认。 */
+function logSent(isGroup, targetId, name, text, kind = 'text') {
+  try {
+    archive.append({
+      t: Math.floor(Date.now() / 1000),
+      c: isGroup ? 'group' : 'private',
+      id: String(targetId),
+      n: String(name || '').slice(0, 40),
+      s: String((client && client.selfId) || ''),
+      sn: '',
+      me: true,
+      x: String(text || '').slice(0, 1000),
+      k: kind,
+      mid: 0
+    });
+  } catch {
+    /* 归档失败不影响发送 */
+  }
 }
 
 /** 我最后一句是不是在问他话——决定过一会儿要不要「追问」。
@@ -911,6 +932,16 @@ async function detectPersonaChange(text, currentPersona) {
 }
 
 async function onMessage(event) {
+  // 归档放在一切过滤之前：白名单只决定「回不回」，不决定「记不记」。
+  // 只记白名单等于自己把库剪掉一半，以后问「我跟某某说过什么」就答不上来。
+  if (event && event.post_type === 'message') {
+    try {
+      archive.append(archive.fromEvent(event, { selfId: client && client.selfId }));
+    } catch {
+      /* 归档失败不能影响收发 */
+    }
+  }
+
   const cfg = getCfg();
   if (!cfg.enabled) return;
 
@@ -1205,16 +1236,40 @@ async function flushChat(qq) {
   const plain = bubbles.join(' '); // 记忆/去重/护栏用合并文本
   let sentMeme = false;
   if (client && memePath) {
+    // 文字和图分开发，不要拼进同一条 message：
+    // 拼在一起时 QQ 会把它渲染成「一段文字 + 一张图」的富文本卡片，
+    // 一眼就是机器人；真人永远是先在对话框里说一句，再甩个表情包。
+    // 顺序必须是「先文字、后图片」——先图后字在聊天里等于对方先看到图、
+    // 再看到你在解释它，很怪。
+    if (plain && !sentVoice && bubbles.length) {
+      try {
+        for (let i = 0; i < bubbles.length; i += 1) {
+          if (!client) throw new Error('连接已关闭');
+          const r = await (isGroup
+            ? client.sendGroupText(targetId, bubbles[i])
+            : client.sendPrivateText(targetId, bubbles[i]));
+          if (r && r.message_id) sentIds.push(Number(r.message_id));
+          if (i < bubbles.length - 1) {
+            const gap = BUBBLE_GAP_MS[0] + Math.random() * (BUBBLE_GAP_MS[1] - BUBBLE_GAP_MS[0]);
+            await new Promise((res) => setTimeout(res, gap));
+          }
+        }
+      } catch (err) {
+        dbg('[qq]', name, '配图前文字发送失败：', err.message);
+      }
+    }
     try {
-      const segs = [];
-      if (plain && !sentVoice) segs.push({ type: 'text', data: { text: plain } });
-      segs.push({ type: 'image', data: { file: `file:///${memePath.replace(/\\/g, '/')}` } });
-      const r = await client.sendSegments(isGroup, targetId, segs);
+      // 图单独一条；隔一下再发，接在文字后面像顺手甩的
+      const gap = BUBBLE_GAP_MS[1] + Math.random() * 400;
+      await new Promise((res) => setTimeout(res, gap));
+      const r = await client.sendImage(isGroup, targetId, memePath);
       if (r && r.message_id) sentIds.push(Number(r.message_id));
       sentMeme = true;
-      dbg('[qq] 已发送配图 ->', name, path.basename(memePath));
+      dbg('[qq] 已发送配图（文字后单独一条） ->', name, path.basename(memePath));
     } catch (err) {
       dbg('[qq]', name, '配图发送失败：', err.message);
+      // 图没发出去，但文字已经发出去了，不能落回下面「再发一遍文字」的分支
+      sentMeme = !!(plain && !sentVoice);
     }
   }
 
@@ -1247,6 +1302,14 @@ async function flushChat(qq) {
 
   guardRecord(getCfg(), qq, plain);
   const cs = chatState(qq);
+  // 自己发出去的话也要进归档，否则查出来的历史只有对方那半句，读不成对话。
+  // 按实际发了什么记：语音走语音分支时正文没发，别把 bubbles 当成已发。
+  if (sentVoice) {
+    logSent(isGroup, targetId, name, `[语音] ${sayText || '（预置短句）'}`, 'record');
+  } else {
+    for (const b of bubbles) logSent(isGroup, targetId, name, b);
+  }
+  if (sentMeme) logSent(isGroup, targetId, name, `[图片] ${path.basename(memePath || '')}`, 'image');
   // 主动消息的时间线：记下「我最后说了什么、是不是问句」，追问靠它判断
   if (!isGroup) {
     cs.lastOutgoingAt = Date.now();
@@ -1367,6 +1430,9 @@ async function sendProactive(qq, due, now, name) {
     }
   }
   const plain = bubbles.join(' ') || '（表情包）';
+  // 主动开口的内容同样入档，不然历史里只有对方回的那半句，看不出是谁先说话
+  for (const b of bubbles) logSent(false, qq, name, b);
+  if (gen.memePath) logSent(false, qq, name, `[图片] ${path.basename(gen.memePath)}`, 'image');
   const t = proactive.clockOf(now, p.tzOffsetMinutes || 0);
   const before = proactive.dailyCount(cs, t.day);
   cs.lastProactiveAt = now;
