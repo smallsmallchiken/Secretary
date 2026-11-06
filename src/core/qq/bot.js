@@ -9,6 +9,7 @@ const media = require('../media/library');
 const { dataDir } = require('../paths');
 const { OneBotClient } = require('./client');
 const archive = require('./archive');
+const observer = require('./observer');
 const proactive = require('./proactive');
 
 /**
@@ -201,6 +202,10 @@ function defaultConfig() {
   return {
     // 默认关：必须用户在右键菜单显式打开才工作
     enabled: false,
+    // 只收不发：连上 NapCat 全量接收并归档（含媒体原文件），但绝不发任何消息。
+    // 与 enabled 独立——enabled 控制「要不要连」，observeOnly 控制「连上后干什么」。
+    // 开启时白名单/护栏/模型/主动消息全部旁路，硬闸在 client.callApi 再兜一层。
+    observeOnly: false,
     wsUrl: 'ws://127.0.0.1:3001',
     token: '',
     // 白名单：{ qq, name } 私聊；{ group, name } 群聊。空数组 = 谁都不回
@@ -821,6 +826,7 @@ function status() {
   const cfg = getCfg();
   return {
     enabled: !!cfg.enabled,
+    observeOnly: !!cfg.observeOnly,
     running: !!(client && client.connected),
     selfId: client ? client.selfId : null,
     url: cfg.wsUrl,
@@ -833,7 +839,9 @@ function status() {
 async function start() {
   const cfg = getCfg();
   if (client) stop(true);
-  if ((!cfg.whitelist || !cfg.whitelist.length) && !cfg.allFriends) {
+  // 只收不发的目的是「处理所有信息」，不需要白名单；白名单是回复模式用来限定
+  // 「回谁」的，套在监听模式上反而会把绝大部分消息丢掉。
+  if (!cfg.observeOnly && (!cfg.whitelist || !cfg.whitelist.length) && !cfg.allFriends) {
     say('QQ 自动回复没启动：白名单是空的（先把要回复的人加进配置，或开启 allFriends）');
     return { ok: false, message: '白名单为空' };
   }
@@ -841,14 +849,17 @@ async function start() {
   client = new OneBotClient({
     url: cfg.wsUrl,
     token: cfg.token,
+    observeOnly: !!cfg.observeOnly,
     onEvent: handleEvent,
     onStatus: (s, detail) => {
       dbg('[qq] 连接状态:', s, detail || '');
       if (s === 'connected') {
         say(
-          cfg.allFriends
-            ? 'QQ 机器人已连上 NapCat，所有好友私聊都会回复'
-            : 'QQ 机器人已连上 NapCat，开始值守私聊白名单'
+          cfg.observeOnly
+            ? 'QQ 已连上 NapCat，进入只收不发的监听模式（全量归档，不会发送任何消息）'
+            : cfg.allFriends
+              ? 'QQ 机器人已连上 NapCat，所有好友私聊都会回复'
+              : 'QQ 机器人已连上 NapCat，开始值守私聊白名单'
         );
         client
           .getLoginInfo()
@@ -866,10 +877,17 @@ async function start() {
       }
     }
   });
-  config.set({ qq: { ...cfg, enabled: true } });
+  // 监听模式**不要把 enabled 写成 true**。enabled 是自动回复的开关，
+  // 一旦被写成 true，将来关掉 observeOnly 的那一刻机器人就会突然开始自动回复。
+  // 监听模式靠 observeOnly 独立启动，enabled 保持原值（通常 false）。
+  config.set({ qq: { ...cfg, enabled: cfg.observeOnly ? !!cfg.enabled : true } });
   client.start();
-  startProactiveTimer();
-  dbg('[qq] 启动，白名单', cfg.whitelist.length, '人');
+  // 主动消息是「定时主动发给别人」，监听模式绝对不能开。
+  // 即便有人误配，client.callApi 的硬闸也会挡下，但这里不启动更干净：
+  // 省掉模型调用、也避免定时器空转。
+  if (!cfg.observeOnly) startProactiveTimer();
+  else stopProactiveTimer();
+  dbg('[qq] 启动，', cfg.observeOnly ? '只收不发（全部会话）' : '白名单 ' + cfg.whitelist.length + ' 人');
   return { ok: true };
 }
 
@@ -951,6 +969,22 @@ async function detectPersonaChange(text, currentPersona) {
 }
 
 async function onMessage(event) {
+  const cfg = getCfg();
+
+  // 只收不发模式：全量接收 + 连同媒体原文件一起落盘，然后**立刻返回**。
+  // 不看白名单、不进护栏、不调模型、不排队攒消息——「处理所有信息」意味着
+  // 任何会话（含群、陌生人、临时会话）都要记，过滤是回复模式才有的概念。
+  if (cfg.observeOnly) {
+    if (event && event.post_type === 'message') {
+      try {
+        observer.capture(event, { selfId: client && client.selfId });
+      } catch (err) {
+        dbg('[qq][observe] 归档失败:', err.message);
+      }
+    }
+    return;
+  }
+
   // 归档放在一切过滤之前：白名单只决定「回不回」，不决定「记不记」。
   // 只记白名单等于自己把库剪掉一半，以后问「我跟某某说过什么」就答不上来。
   if (event && event.post_type === 'message') {
@@ -961,7 +995,6 @@ async function onMessage(event) {
     }
   }
 
-  const cfg = getCfg();
   if (!cfg.enabled) return;
 
   // 只处理私聊和群聊。讨论组/频道一律忽略
@@ -1609,8 +1642,9 @@ function stopProactiveTimer() {
 function init(notifierFn) {
   setNotifier(notifierFn);
   const cfg = getCfg();
-  if (cfg.enabled) {
-    // 恢复上次开着的状态
+  // 监听模式可以独立于 enabled 启动：enabled 是「自动回复开关」的历史语义，
+  // 只收不发时它可能仍是 false，但我们必须连上 NapCat 才能收消息。
+  if (cfg.enabled || cfg.observeOnly) {
     start().catch((err) => dbg('[qq] 恢复启动失败:', err.message));
   }
 }

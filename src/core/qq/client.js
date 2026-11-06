@@ -18,11 +18,15 @@ const RECONNECT_MAX_MS = 30000;
 const API_TIMEOUT_MS = 15000;
 
 class OneBotClient {
-  constructor({ url, token, onEvent, onStatus } = {}) {
+  constructor({ url, token, onEvent, onStatus, observeOnly = false } = {}) {
     this.url = url || 'ws://127.0.0.1:3001';
     this.token = token || '';
     this.onEvent = onEvent || (() => {});
     this.onStatus = onStatus || (() => {});
+    // 只收不发模式的**硬闸**：在协议层拦掉所有发送类 action。
+    // bot.js 里也有 observeOnly 分支，但那属于业务逻辑，将来被人改动就可能漏；
+    // 这里兜底，保证「账号绝不发出任何消息」这个承诺不依赖上层写法。
+    this.observeOnly = !!observeOnly;
     this.ws = null;
     this.echoSeq = 0;
     this.pending = new Map(); // echo -> { resolve, reject, timer }
@@ -171,6 +175,11 @@ class OneBotClient {
 
   /** 调 OneBot API。返回 data 字段。 */
   callApi(action, params = {}) {
+    if (this.observeOnly && /^(send_|set_|delete_)/.test(action)) {
+      // 只读 API（get_login_info / get_friend_list …）照常放行，接收需要它们；
+      // 发送、撤回、已读上报等一切会改动对方可见状态的操作全部拦下。
+      return Promise.reject(new Error(`[observeOnly] 已拦截 ${action}：本账号只收不发`));
+    }
     return new Promise((resolve, reject) => {
       if (!this.connected) {
         reject(new Error('与 NapCat 的连接还没就绪'));

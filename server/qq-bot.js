@@ -43,6 +43,7 @@ function cfg() {
   const qq = config.get('qq', {}) || {};
   return {
     enabled: qq.enabled === true,
+    observeOnly: qq.observeOnly === true,
     wsUrl: qq.wsUrl || '',
     token: qq.token ? '已配置' : '空',
     allFriends: !!qq.allFriends,
@@ -113,9 +114,12 @@ async function main() {
     process.exit(code);
   }
 
-  if (!cfg().enabled) {
-    say('qq.enabled=false —— 值守没开，退出。要开就去 .data/config.json 里改。');
+  if (!cfg().enabled && !cfg().observeOnly) {
+    say('qq.enabled=false 且 observeOnly=false —— 值守没开，退出。要开就去 .data/config.json 里改。');
     process.exit(0);
+  }
+  if (cfg().observeOnly) {
+    say('★ 只收不发的监听模式：全量接收并归档（含媒体原文件），不会发送任何消息');
   }
 
   // 收发播报：本地那套是弹气泡，服务器上就是日志
