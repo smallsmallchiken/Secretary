@@ -50,7 +50,8 @@ VISION_MODEL = 'Qwen/Qwen3-VL-32B-Instruct'
 ASR_MODEL = 'FunAudioLLM/SenseVoiceSmall'
 MAX_MODEL_CHARS = 14000          # 喂给模型的流水上限，防超长
 MAX_MEDIA_COPY = 20 * 1024 * 1024  # 单个媒体超过 20MB 只留路径不复制
-MAX_ENRICH = 30                  # 每天最多转写/描述多少个媒体，防限流和烧钱
+MAX_ENRICH = 60                  # 每天最多转写/描述多少个媒体，防限流和烧钱
+                                 # 微信每条消息都带截图，30 不够用，放宽到 60
 
 KIND_LABEL = {
     'text': '文字', 'image': '图片', 'sticker': '表情包', 'mface': '表情包',
@@ -288,12 +289,35 @@ def _asr(cfg, path):
         return ''
 
 
-def enrich_media(msgs, gallery, cfg, out_day):
-    """QQ 侧媒体做内容理解：语音转文字、图片生成描述。
+def _vision(cfg, path, prompt):
+    """让视觉模型读一张图。QQ 的原图与微信的气泡截图都走这里。"""
+    try:
+        b64 = base64.b64encode(open(path, 'rb').read()).decode('ascii')
+        mime = 'image/png' if path.lower().endswith('.png') else 'image/jpeg'
+        d = _api_post(cfg, '/chat/completions', {
+            'model': VISION_MODEL,
+            'messages': [{'role': 'user', 'content': [
+                {'type': 'text', 'text': prompt},
+                {'type': 'image_url',
+                 'image_url': {'url': 'data:%s;base64,%s' % (mime, b64)}}
+            ]}],
+            'max_tokens': 80, 'temperature': 0.2, 'stream': False
+        }, timeout=60)
+        if d:
+            return (d['choices'][0]['message']['content'] or '').strip()[:100]
+    except Exception as e:
+        log('视觉描述失败: %s' % e)
+    return ''
 
-    用户要的是「以待后续处理」的清单——只丢一个 [语音] 标记没法处理，
-    必须能读到里面说了什么。结果缓存到 media_desc.json，重跑不重复烧钱。
-    微信侧拿不到原文件，只有截图，不做理解（清单里直接能看到图）。
+
+def enrich_media(msgs, gallery, cfg, out_day):
+    """媒体做内容理解：QQ 语音转文字、QQ 原图/微信截图生成描述。
+
+    用户要的是「以待后续处理」的清单——只丢一个 [语音] 标记或一个
+    「鱼 / 可 / 做」这种 OCR 噪声没法处理，必须能读到里面是什么。
+    微信 4.1.26 拿不到原始文件，但**气泡截图本身就是图**，视觉模型能
+    读出卡片文字、认出表情和图片内容，所以一样要理解，不能只挂着链接。
+    结果缓存到 media_desc.json，重跑不重复烧钱。
     """
     cache_path = os.path.join(out_day, 'media_desc.json')
     cache = {}
@@ -304,7 +328,7 @@ def enrich_media(msgs, gallery, cfg, out_day):
             cache = {}
     done = 0
     for f in gallery:
-        if f['platform'] != 'QQ' or not f['local']:
+        if not f['local']:
             continue
         key = f['path']
         if key in cache:
@@ -317,22 +341,18 @@ def enrich_media(msgs, gallery, cfg, out_day):
             desc = ''
             if typ in ('语音', '语音条'):
                 desc = _asr(cfg, p)
+            elif typ == '截图':
+                desc = _vision(cfg, p,
+                               '这是微信消息气泡的截图。用一句中文概括这条消息：'
+                               '如果是文字或卡片，写出主要内容；如果是图片/表情/'
+                               '语音条/视频/文件，说明类型和画面。40字内，不要解释。')
             elif typ in ('图片', '表情包', '表情', '视频'):
-                try:
-                    b64 = base64.b64encode(open(p, 'rb').read()).decode('ascii')
-                    mime = 'image/png' if p.lower().endswith('.png') else 'image/jpeg'
-                    d = _api_post(cfg, '/chat/completions', {
-                        'model': VISION_MODEL,
-                        'messages': [{'role': 'user', 'content': [
-                            {'type': 'text', 'text': '用一句中文说明这张图/表情包的内容或表达的情绪，20字内，不要解释。'},
-                            {'type': 'image_url', 'image_url': {'url': 'data:%s;base64,%s' % (mime, b64)}}
-                        ]}], 'max_tokens': 60, 'temperature': 0.2
-                    }, timeout=60)
-                    if d:
-                        desc = (d['choices'][0]['message']['content'] or '').strip()[:100]
-                except Exception as e:
-                    log('视觉描述失败: %s' % e)
-            cache[key] = desc
+                desc = _vision(cfg, p,
+                               '用一句中文说明这张图/表情包的内容或表达的情绪，20字内，不要解释。')
+            # 失败的（空描述）不要写进缓存：定时报告每小时重跑一次，
+            # 让限流/网络抖动能在下一轮自己恢复，别把失败固化住。
+            if desc:
+                cache[key] = desc
             done += 1
         f['desc'] = desc
         if desc:
@@ -631,10 +651,12 @@ localStorage.setItem(k,JSON.stringify(s))})})(b[i])}})();
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--date', default='')
+    ap.add_argument('--yesterday', action='store_true',
+                    help='补生成昨天：覆盖 23:30 之后到零点前漏掉的消息')
     ap.add_argument('--out', default=OUT_DIR)
     ap.add_argument('--no-llm', action='store_true')
     a = ap.parse_args()
-    day = a.date or bj_day()
+    day = a.date or (bj_day(time.time() - 86400) if a.yesterday else bj_day())
     out_day = os.path.join(a.out, day)
     media_dir = os.path.join(out_day, 'media')
     os.makedirs(media_dir, exist_ok=True)
