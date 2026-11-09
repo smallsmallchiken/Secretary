@@ -106,6 +106,57 @@ lastProactiveAt / lastRevisitAt / proactiveDay / slotFired`。老状态没有这
 
 **别在两个进程里同时开 QQ 值守**（本地桌宠 + 服务器容器）：回复会重复，主动消息也会双发。
 
+## 手机控制端（`/desk`）
+
+手机浏览器打开 `http://8.139.252.197/desk/?t=<页面口令>`，加一次口令就记在 localStorage。
+页面是静态的，托管在 `desk` 容器（`server/desk/server.js`，零依赖纯 Node，8765 只监听回环，
+nginx 把 `/desk/` 反代过去）。
+
+方向是**反的**：电脑主动连出去长轮询（25 秒挂起，有指令立刻回），所以不需要公网 IP、
+不需要端口映射、不怕运营商封 80。
+
+两个口令不能混：
+
+| 口令 | 谁用 | 在哪 |
+|---|---|---|
+| 页面口令 | 手机（读写状态、下指令、拉截图） | `DESK_TOKEN` |
+| 电脑口令 | 桌上的机器（取指令、上报状态、传截图） | `DESK_AGENT_TOKEN` + 本地 `.data/config.json` 的 `remote.token` |
+
+指令清单：`shutdown` / `restart` / `sleep` / `lock` / `cancel` / `shot` / `say` /
+`media`（音量、静音、切歌）/ `openapp`（走本地 `appAliases`）。应用按钮的列表由电脑端
+每 8 秒上报，服务端不硬编码。
+
+### 电源操作默认是关的，要开得两处同时开
+
+关机 / 重启 / 睡眠**不可撤销**，而且人可能在外面连电源键都按不到。所以做了三层闸，
+任何一层开着都不会执行：
+
+| 层 | 位置 | 默认 |
+|---|---|---|
+| 模型工具 | `src/core/tools/index.js` 里没有 power 工具 | 无 |
+| 桌面执行 | `.data/config.json` 的 `power.allow` | `false` |
+| 手机服务端 | desk 容器的 `DESK_ALLOW_POWER=1` | 未设 |
+
+只开一层仍然会被拒（服务端直接 403，指令连队列都不进）。确认要开了，两处都改，
+然后 `docker restart desk`。
+
+**别拿真机验证关机。** 上一版验证方式是「排程 600 秒再 `/a` 取消」，任何一步失败机器就黑了。
+要验就跑 `node tools/test-power.js`（把 `child_process.spawn` 换成假函数）和
+`node tools/test-desk.js`（起真服务端起随机端口），两个都不碰电源。
+
+### 部署
+
+```bash
+cd /opt/secretary && git fetch --depth 1 origin main && git reset --hard FETCH_HEAD
+docker restart desk && docker logs --tail 5 desk
+curl -s --noproxy '*' -X POST 'http://127.0.0.1:8765/api/cmd?t=<页面口令>' \
+  -H 'Content-Type: application/json' -d '{"cmd":"shutdown"}'
+# 期望：{"error":"power-disabled",...}
+```
+
+服务端重启会把 `seq` 清零，而电脑端的 `since` 还停在旧值——旧版本会出现「手机点了按钮
+没反应，得连点几次」。现在 `poll` 发现 `since > seq` 就抬上来并立刻回 `{resync:true}`。
+
 ## 常用命令
 
 ```bash
