@@ -290,6 +290,7 @@ async function pollLoop() {
 async function reportLoop() {
   let tick = 0;
   let info = null;
+  let reportFail = 0;
   // 等一会儿再报第一次：CPU 占用要两次采样才有数，
   // 和 start() 里的预热挨太近会算不出东西
   await sleep(1200);
@@ -323,8 +324,12 @@ async function reportLoop() {
         continue;
       }
     } catch (err) {
-      // 账号口令错已经由 pollLoop 报过，这里静默
-      void err;
+      // 别静默：上报断了手机就一直显示上一次的列表，用户只会觉得「不实时」。
+      // 但也不能每秒刷一行，前三次 + 之后每 30 次记一条。
+      reportFail += 1;
+      if (reportFail <= 3 || reportFail % 30 === 0) {
+        dbg(`[remote] 上报失败（第 ${reportFail} 次）：${err.message}`);
+      }
     }
     await sleep(3500);
   }
