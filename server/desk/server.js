@@ -265,7 +265,7 @@ async function handle(req, res) {
     // 这种情况立刻回一个空响应（不挂 25 秒），客户端会带着新 seq 马上再来一轮。
     if (since > state.seq) {
       state.seq = since;
-      return json(res, 200, { cmds: [], now: Date.now(), resync: true });
+      return json(res, 200, { cmds: [], seq: state.seq, now: Date.now(), resync: true });
     }
     dropStale();
 
