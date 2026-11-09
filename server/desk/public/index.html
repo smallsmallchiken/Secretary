@@ -81,6 +81,14 @@
   button.danger.armed .lb{color:#2a0f0f;font-weight:700}
   button.wide{grid-column:span 3;flex-direction:row;justify-content:center;gap:8px;padding:12px}
   button.wide .lb{font-size:13px}
+  /* 电源键在没开启时保持可点：点了要能解释为什么没反应，disabled 连 click 都不给 */
+  button.off{opacity:.36;border-color:var(--line)}
+  button.off.danger{background:var(--card);border-color:var(--line)}
+  /* 应用按钮：横向胶囊，数量不定，自动换行 */
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+  .chips:empty{display:none}
+  .chips button{flex:0 0 auto;flex-direction:row;gap:6px;padding:9px 14px;border-radius:18px}
+  .chips button .lb{font-size:12px}
 
   /* ---------- 输入 ---------- */
   .say{display:flex;gap:8px;margin-bottom:max(10px,env(safe-area-inset-bottom))}
@@ -176,6 +184,29 @@
     <span class="ic">✕</span><span class="lb">取消关机</span>
   </button>
 </div>
+
+<div class="grid">
+  <button id="btnVolDown">
+    <span class="ic">🔉</span><span class="lb">音量-</span>
+  </button>
+  <button id="btnMute">
+    <span class="ic">🔇</span><span class="lb">静音</span>
+  </button>
+  <button id="btnVolUp">
+    <span class="ic">🔊</span><span class="lb">音量+</span>
+  </button>
+  <button id="btnPrev">
+    <span class="ic">⏮</span><span class="lb">上一首</span>
+  </button>
+  <button id="btnPlay">
+    <span class="ic">⏯</span><span class="lb">播放/暂停</span>
+  </button>
+  <button id="btnNext">
+    <span class="ic">⏭</span><span class="lb">下一首</span>
+  </button>
+</div>
+
+<div class="chips" id="appChips"></div>
 
 <div class="say">
   <input id="msg" placeholder="跟它说点什么…" autocomplete="off" enterkeyhint="send">
@@ -300,12 +331,43 @@
   let lastSeenResult = 0;
   let primed = false;
 
-  // 电源三键默认是锁着的：服务端 DESK_ALLOW_POWER 没开就一直是禁用态。
-  // 先把 disabled 设上，别等第一次 state 回来——那 2.5 秒里点到就发出去了
+  // 电源三键默认是锁着的：服务端 DESK_ALLOW_POWER 没开就一直显示成灰的。
+  // 不用 disabled，因为 disabled 的按钮连 click 都不触发，点了没反应更让人摸不着头脑——
+  // 保持可点，点了弹一句「为什么没反应」。
   const powerBtns = ['btnShutdown', 'btnRestart', 'btnSleep'].map((id) => document.getElementById(id));
-  for (const b of powerBtns) b.disabled = true;
+  let powerOk = false;
+  for (const b of powerBtns) b.classList.add('off');
   function applyPower(on) {
-    for (const b of powerBtns) b.disabled = !on;
+    powerOk = on;
+    for (const b of powerBtns) b.classList.toggle('off', !on);
+  }
+
+  // 「打开应用」的按钮由电脑端上报（appAliases 的键），这台机器装了啥只有它知道。
+  // 每 2.5 秒会来一次 state，列表没变就不重建——重建会把正在按的手指弄丢
+  const appChips = document.getElementById('appChips');
+  let appsSig = '';
+  function renderApps(list) {
+    const arr = (list || []).slice(0, 8);
+    const sig = arr.join('|');
+    if (sig === appsSig) return;
+    appsSig = sig;
+    appChips.innerHTML = '';
+    for (const name of arr) {
+      const b = document.createElement('button');
+      const ic = document.createElement('span');
+      ic.className = 'ic';
+      ic.textContent = '📂';
+      const lb = document.createElement('span');
+      lb.className = 'lb';
+      lb.textContent = name; // textContent，别让配置里的名字变成 HTML
+      b.appendChild(ic);
+      b.appendChild(lb);
+      b.onclick = async () => {
+        toast('正在打开 ' + name + '…');
+        await send('openapp', { name });
+      };
+      appChips.appendChild(b);
+    }
   }
 
   function setConn(on) {
@@ -323,6 +385,7 @@
     const info = state.info || {};
     document.getElementById('host').textContent = state.host ? '· ' + state.host : '';
     applyPower(state.power === true);
+    renderApps(state.apps);
 
     const bat = info.battery;
     document.getElementById('bat').textContent = bat == null ? '--' : Math.round(bat);
@@ -415,6 +478,10 @@
     const old = lb.textContent;
     let timer = null;
     btn.onclick = async () => {
+      if (!powerOk) {
+        toast('电源操作已关闭，需要在电脑上开启后才生效', true);
+        return;
+      }
       if (!btn.classList.contains('armed')) {
         btn.classList.add('armed');
         lb.textContent = text;
@@ -440,6 +507,7 @@
   arm(document.getElementById('btnRestart'), 'restart', '再点确认');
 
   document.getElementById('btnSleep').onclick = async () => {
+    if (!powerOk) return toast('电源操作已关闭，需要在电脑上开启后才生效', true);
     const d = await send('sleep');
     if (!d || d.error) return;
     play('sleep', 4000);
@@ -458,6 +526,21 @@
     play('think', 2500);
     await send('shot');
   };
+
+  // 媒体与音量：走系统媒体键，对网易云、浏览器视频、QQ音乐都有效，
+  // 反馈靠电脑回执（results），不在本地假装成功
+  for (const [id, action] of [
+    ['btnVolDown', 'volume_down'],
+    ['btnMute', 'mute'],
+    ['btnVolUp', 'volume_up'],
+    ['btnPrev', 'prev'],
+    ['btnPlay', 'toggle'],
+    ['btnNext', 'next']
+  ]) {
+    document.getElementById(id).onclick = async () => {
+      await send('media', { action });
+    };
+  }
 
   const input = document.getElementById('msg');
   async function submit() {

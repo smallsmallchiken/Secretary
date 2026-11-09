@@ -18,6 +18,8 @@ const path = require('path');
 const { URL } = require('url');
 const config = require('../core/config');
 const system = require('../core/tools/system');
+const media = require('../core/tools/media');
+const apps = require('../core/tools/apps');
 const { dbg } = require('../core/debug');
 
 let running = false;
@@ -138,6 +140,21 @@ async function execOne(c) {
         fs.unlink(r.data, () => {});
         break;
       }
+      case 'media': {
+        const r = await media.control(String(args.action || 'toggle'));
+        ok = true;
+        message = r.message;
+        break;
+      }
+      case 'openapp': {
+        const name = String(args.name || '').trim();
+        if (!name) throw new Error('要打开哪个应用？');
+        const aliases = config.get('appAliases', {}) || {};
+        const r = await apps.openApp(name, aliases);
+        ok = true;
+        message = r.message;
+        break;
+      }
       case 'say': {
         const text = String(args.text || '').slice(0, 500).trim();
         if (!text) throw new Error('空消息');
@@ -209,9 +226,12 @@ async function reportLoop() {
   while (running) {
     try {
       const info = await system.sysinfo();
+      // 把 appAliases 的键带上去，手机端才能生成「打开应用」的按钮——
+      // 应用列表只有这台机器知道，服务端不该硬编码
+      const apps = Object.keys(config.get('appAliases', {}) || {});
       const r = await request(`/agent/report?t=${encodeURIComponent(cfg().token || '')}`, {
         method: 'POST',
-        body: { info },
+        body: { info, apps },
         timeout: 12000
       });
       if (r.status === 200) last = Date.now();

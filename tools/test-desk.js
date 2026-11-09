@@ -131,6 +131,36 @@ async function main() {
     check('shot 放行', shot.status === 200 && !!(shot.json && shot.json.ok), `HTTP ${shot.status}`);
     const lock = await request(port, `/api/cmd?t=${TOKEN}`, 'POST', { cmd: 'lock' });
     check('lock 放行（不丢数据，不该拦）', lock.status === 200, `HTTP ${lock.status}`);
+    for (const cmd of ['media', 'openapp']) {
+      const r = await request(port, `/api/cmd?t=${TOKEN}`, 'POST', {
+        cmd,
+        args: cmd === 'media' ? { action: 'next' } : { name: '网易云' }
+      });
+      check(`${cmd} 放行`, r.status === 200, `HTTP ${r.status}`);
+    }
+
+    console.log('\n[2b] 应用列表跟着电脑端上报走');
+    await request(port, `/agent/report?t=${AGENT}`, 'POST', {
+      info: { host: 'test-pc' },
+      apps: ['网易云', '微信']
+    });
+    const st2 = await request(port, `/api/state?t=${TOKEN}`, 'GET');
+    check(
+      'state.apps 就是上报的那两个',
+      !!(st2.json && Array.isArray(st2.json.apps) && st2.json.apps.join(',') === '网易云,微信'),
+      JSON.stringify(st2.json && st2.json.apps)
+    );
+
+    await request(port, `/agent/report?t=${AGENT}`, 'POST', {
+      info: { host: 'test-pc' },
+      apps: Array.from({ length: 20 }, (_, i) => 'app' + i)
+    });
+    const st3 = await request(port, `/api/state?t=${TOKEN}`, 'GET');
+    check(
+      '超过 8 个只留 8 个（别把手机挤爆）',
+      !!(st3.json && st3.json.apps && st3.json.apps.length === 8),
+      String(st3.json && st3.json.apps && st3.json.apps.length)
+    );
 
     console.log('\n[3] token 先于一切');
     const bad = await request(port, '/api/cmd?t=wrong', 'POST', { cmd: 'shutdown' });

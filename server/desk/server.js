@@ -57,7 +57,8 @@ const state = {
     lastSeen: 0,
     seenSeq: 0,
     info: null,
-    host: ''
+    host: '',
+    apps: [] // 电脑端上报的 appAliases 键名，手机端据此生成「打开应用」按钮
   },
   shots: new Map(), // shotId -> { buf, at }  截图只留内存，页面关了就没人看
   startedAt: Date.now()
@@ -200,6 +201,7 @@ async function handle(req, res) {
       lastSeen: state.agent.lastSeen,
       host: state.agent.host,
       info: state.agent.info,
+      apps: state.agent.apps,
       seq: state.seq,
       pending: state.queue.length,
       power: ALLOW_POWER,
@@ -312,6 +314,7 @@ async function handle(req, res) {
     state.agent.lastSeen = Date.now();
     state.agent.info = body.info || null;
     state.agent.host = (body.info && body.info.host) || state.agent.host;
+    if (Array.isArray(body.apps)) state.agent.apps = body.apps.slice(0, 8).map(String);
     return json(res, 200, { ok: true, seq: state.seq });
   }
 
