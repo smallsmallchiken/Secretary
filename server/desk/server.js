@@ -189,6 +189,21 @@ async function handle(req, res) {
   if (p === '/icon-192.png' || p === '/icon-512.png') {
     return serveStatic(res, path.join(PUBLIC, path.basename(p)), 'image/png', 604800);
   }
+  // 手机浏览器直接下 APK 装。用 attachment 头，不然部分浏览器会当文本打开
+  if (p === '/desk.apk') {
+    fs.readFile(path.join(PUBLIC, 'desk.apk'), (err, buf) => {
+      if (err) return json(res, 404, { error: '还没打包，先在电脑上跑 tools/build-apk.py' });
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.android.package-archive',
+        'Content-Length': buf.length,
+        'Content-Disposition': 'attachment; filename="desk.apk"',
+        'Cache-Control': 'no-store'
+      });
+      res.end(buf);
+    });
+    return;
+  }
+
   if (p === '/healthz') {
     return json(res, 200, { ok: true, online: online(), up: Math.round((Date.now() - state.startedAt) / 1000) });
   }

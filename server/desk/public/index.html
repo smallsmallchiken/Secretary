@@ -131,6 +131,11 @@
               border:1px solid var(--line);border-radius:12px;padding:12px 14px;outline:none;text-align:center}
   .gate button{width:100%;max-width:300px;background:var(--accent);color:#221c07;border:none;
                border-radius:12px;padding:13px;font-weight:600}
+  /* 底部「装成 App」入口：在 APK 壳里打开时由 JS 保持隐藏 */
+  .getapp{display:none;text-align:center;margin:20px 16px 26px;font-size:12px;
+    color:var(--dim);text-decoration:none;letter-spacing:.3px}
+  .getapp.show{display:block}
+  .getapp b{color:var(--accent);font-weight:600}
 </style>
 </head>
 <body class="offline">
@@ -212,6 +217,8 @@
   <input id="msg" placeholder="跟它说点什么…" autocomplete="off" enterkeyhint="send">
   <button id="btnSend"><span class="ic">↑</span></button>
 </div>
+
+<a class="getapp" id="getApp" href="desk.apk" download>想常驻手机？<b>装成 App</b>（APK，约 0.3MB）</a>
 
 <div class="toast" id="toast"></div>
 
@@ -449,6 +456,9 @@
   }
   tick();
   setInterval(tick, 2500);
+  // APK 壳从后台回到前台时会调这个：锁屏期间 JS 定时器被挂起，
+  // 不立刻拉一次的话画面上还是几分钟前的状态
+  window.__deskRefresh = tick;
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
 
   /* ---------------- 指令 ---------------- */
@@ -550,6 +560,10 @@
     say(text); // 先把自己说的显示出来，别像石沉大海
     play('think', 6000);
     await send('say', { text });
+  }
+  // 在 APK 壳里打开时不显示安装入口：WebView 的 UA 里带 "; wv"
+  if (!/;\s*wv\)/.test(navigator.userAgent)) {
+    document.getElementById('getApp').classList.add('show');
   }
   document.getElementById('btnSend').onclick = submit;
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });

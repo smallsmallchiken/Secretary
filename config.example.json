@@ -68,5 +68,13 @@
   "power": {
     "allow": false,
     "note": "关机/重启/睡眠总闸，默认关闭。桌面端和手机端两个开关都要开才会真的执行"
+  },
+  "remote": {
+    "enabled": true,
+    "base": "http://你的服务器IP/desk",
+    "token": "电脑端向服务器注册用的口令（服务端 DESK_AGENT_TOKEN）",
+    "pageToken": "手机页面/APK 打开控制页用的口令（服务端 DESK_TOKEN）",
+    "name": "这台电脑的名字，显示在手机上",
+    "_note": "token 和 pageToken 是两把不同的钥匙。打 APK 时读的是 pageToken，别填反"
   }
 }

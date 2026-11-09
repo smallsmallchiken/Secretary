@@ -64,3 +64,15 @@ wechat-bot/proactive-state.json
 
 # 塔菲克隆样本与试听（本地素材，不进仓库）
 wechat-bot/taffy-samples/
+
+# ---- Android 壳（android/）----
+# 构建工具链（build-tools + platform + JRE，约 180MB，用 tools/build-apk.py 重新下载即可）
+android/sdk/
+# 中间产物与最终 APK
+android/build/
+dist/*.apk
+# 签名密钥（含私钥，绝不入库；丢了就只能卸载重装）
+android/keystore.jks
+android/keystore.properties
+# 服务器上让人直接下载的 APK（构建产物，不是源码）
+server/desk/public/desk.apk
