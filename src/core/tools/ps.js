@@ -8,7 +8,10 @@ const { spawn } = require('child_process');
  */
 function runPowerShell(script, timeout = 10000, env) {
   return new Promise((resolve, reject) => {
-    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    // 强制 UTF-8 输出：Windows PowerShell 的默认控制台代码页是 936(GBK)，
+    // 中文结果（尤其是错误信息）按 UTF-8 读会变成一串问号。
+    const prelude = '[Console]::OutputEncoding=[Text.Encoding]::UTF8\n';
+    const encoded = Buffer.from(prelude + script, 'utf16le').toString('base64');
     const ps = spawn(
       'powershell.exe',
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],

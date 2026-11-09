@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#111318">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="桌宠">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>桌宠 · 远程控制</title>
+<style>
+  :root{
+    --bg:#111318; --bg2:#171a21; --card:rgba(255,255,255,.055); --line:rgba(255,255,255,.09);
+    --txt:#eceef2; --dim:#8b91a0; --accent:#ffc857; --ok:#4ade80; --bad:#f87171;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%}
+  body{
+    background:radial-gradient(120% 80% at 50% 0%, #1d2029 0%, var(--bg) 55%, #0c0e12 100%);
+    color:var(--txt);
+    font:400 15px/1.45 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    padding:env(safe-area-inset-top) 14px env(safe-area-inset-bottom);
+    display:flex;flex-direction:column;
+    min-height:100dvh;
+    overscroll-behavior:none;
+  }
+
+  /* ---------- 顶部 ---------- */
+  header{display:flex;align-items:center;justify-content:space-between;padding:14px 4px 6px}
+  .name{font-size:15px;font-weight:600;letter-spacing:.3px}
+  .name small{color:var(--dim);font-weight:400;margin-left:6px;font-size:12px}
+  .dot{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--dim)}
+  .dot i{width:7px;height:7px;border-radius:50%;background:var(--dim);transition:.3s}
+  .dot.on i{background:var(--ok);box-shadow:0 0 0 3px rgba(74,222,128,.16)}
+  .dot.on{color:var(--ok)}
+
+  /* ---------- 桌宠 ---------- */
+  .stage{position:relative;display:flex;align-items:center;justify-content:center;
+         flex:1 1 auto;min-height:180px;padding:6px 0 2px}
+  .glow{position:absolute;width:230px;height:230px;border-radius:50%;
+        background:radial-gradient(circle,rgba(255,200,87,.18) 0%,rgba(255,200,87,0) 68%);
+        filter:blur(4px);pointer-events:none}
+  #pet{position:relative;width:min(52vw,210px);height:auto;
+       image-rendering:auto;cursor:pointer;transition:filter .4s,opacity .4s}
+  body.offline #pet{filter:grayscale(1) brightness(.55);opacity:.65}
+
+  .bubble{
+    position:absolute;bottom:4px;left:50%;transform:translate(-50%,8px);
+    max-width:86%;padding:9px 14px;border-radius:14px 14px 14px 4px;
+    background:#262b36;border:1px solid var(--line);color:var(--txt);font-size:13.5px;
+    opacity:0;pointer-events:none;transition:.25s;white-space:pre-wrap;
+    box-shadow:0 8px 24px rgba(0,0,0,.35);
+  }
+  .bubble.show{opacity:1;transform:translate(-50%,0)}
+
+  /* ---------- 状态 ---------- */
+  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0 12px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:9px 10px}
+  .stat .k{font-size:11px;color:var(--dim);letter-spacing:.4px}
+  .stat .v{font-size:17px;font-weight:600;margin-top:2px;font-variant-numeric:tabular-nums}
+  .stat .v span{font-size:11px;color:var(--dim);font-weight:400;margin-left:1px}
+  .bar{height:3px;border-radius:2px;background:rgba(255,255,255,.09);margin-top:6px;overflow:hidden}
+  .bar i{display:block;height:100%;width:0;border-radius:2px;background:var(--accent);transition:width .5s}
+
+  /* ---------- 按钮 ---------- */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:12px}
+  button{
+    font:inherit;color:var(--txt);background:var(--card);border:1px solid var(--line);
+    border-radius:15px;padding:13px 6px;display:flex;flex-direction:column;align-items:center;gap:5px;
+    transition:transform .12s,background .2s,border-color .2s;cursor:pointer;user-select:none;
+  }
+  button:active{transform:scale(.955);background:rgba(255,255,255,.11)}
+  button:disabled{opacity:.35}
+  button .ic{font-size:19px;line-height:1}
+  button .lb{font-size:12px;color:#c8ccd6}
+  button.danger{border-color:rgba(248,113,113,.32);background:rgba(248,113,113,.1)}
+  button.danger.armed{background:var(--bad);border-color:var(--bad);color:#1a0d0d}
+  button.danger.armed .lb{color:#2a0f0f;font-weight:700}
+  button.wide{grid-column:span 3;flex-direction:row;justify-content:center;gap:8px;padding:12px}
+  button.wide .lb{font-size:13px}
+
+  /* ---------- 输入 ---------- */
+  .say{display:flex;gap:8px;margin-bottom:max(10px,env(safe-area-inset-bottom))}
+  .say input{
+    flex:1;font:inherit;color:var(--txt);background:var(--card);border:1px solid var(--line);
+    border-radius:22px;padding:12px 16px;outline:none;min-width:0;
+  }
+  .say input:focus{border-color:rgba(255,200,87,.5)}
+  .say input::placeholder{color:#6a7080}
+  .say button{width:46px;height:46px;padding:0;border-radius:50%;background:var(--accent);
+              border:none;color:#221c07;flex:0 0 auto}
+  .say button .ic{font-size:17px}
+
+  /* ---------- 提示条 ---------- */
+  .toast{
+    position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));transform:translate(-50%,14px);
+    background:#2c313d;border:1px solid var(--line);color:var(--txt);font-size:13px;
+    padding:10px 16px;border-radius:12px;opacity:0;pointer-events:none;transition:.25s;
+    max-width:88vw;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,.45);z-index:9;
+  }
+  .toast.show{opacity:1;transform:translate(-50%,0)}
+  .toast.bad{border-color:rgba(248,113,113,.4);background:#3a2426}
+
+  /* ---------- 截图查看 ---------- */
+  .shot{position:fixed;inset:0;background:rgba(8,9,12,.94);display:none;
+        align-items:center;justify-content:center;z-index:20;padding:16px}
+  .shot.show{display:flex}
+  .shot img{max-width:100%;max-height:88vh;border-radius:10px;border:1px solid var(--line)}
+  .shot .close{position:absolute;top:calc(14px + env(safe-area-inset-top));right:16px;
+               width:38px;height:38px;border-radius:50%;background:var(--card);border:1px solid var(--line);
+               display:flex;align-items:center;justify-content:center;font-size:18px}
+
+  /* ---------- 首次填 token ---------- */
+  .gate{position:fixed;inset:0;background:var(--bg);display:none;flex-direction:column;
+        align-items:center;justify-content:center;gap:14px;padding:28px;z-index:30}
+  .gate.show{display:flex}
+  .gate h2{margin:0;font-size:17px;font-weight:600}
+  .gate p{margin:0;color:var(--dim);font-size:13px;text-align:center;line-height:1.6}
+  .gate input{width:100%;max-width:300px;font:inherit;color:var(--txt);background:var(--card);
+              border:1px solid var(--line);border-radius:12px;padding:12px 14px;outline:none;text-align:center}
+  .gate button{width:100%;max-width:300px;background:var(--accent);color:#221c07;border:none;
+               border-radius:12px;padding:13px;font-weight:600}
+</style>
+</head>
+<body class="offline">
+
+<header>
+  <div class="name">比格多栋<small id="host"></small></div>
+  <div class="dot" id="conn"><i></i><span id="connTxt">连接中</span></div>
+</header>
+
+<div class="stage">
+  <div class="glow"></div>
+  <canvas id="pet" width="192" height="208"></canvas>
+  <div class="bubble" id="bubble"></div>
+</div>
+
+<div class="stats">
+  <div class="stat">
+    <div class="k" id="batK">电量</div>
+    <div class="v"><b id="bat">--</b><span>%</span></div>
+    <div class="bar"><i id="batBar"></i></div>
+  </div>
+  <div class="stat">
+    <div class="k">CPU</div>
+    <div class="v"><b id="cpu">--</b><span>%</span></div>
+    <div class="bar"><i id="cpuBar"></i></div>
+  </div>
+  <div class="stat">
+    <div class="k">内存</div>
+    <div class="v"><b id="mem">--</b><span>G</span></div>
+    <div class="bar"><i id="memBar"></i></div>
+  </div>
+</div>
+
+<div class="grid">
+  <button id="btnShutdown" class="danger">
+    <span class="ic">⏻</span><span class="lb">关机</span>
+  </button>
+  <button id="btnRestart" class="danger">
+    <span class="ic">↻</span><span class="lb">重启</span>
+  </button>
+  <button id="btnSleep">
+    <span class="ic">🌙</span><span class="lb">睡眠</span>
+  </button>
+  <button id="btnLock">
+    <span class="ic">🔒</span><span class="lb">锁屏</span>
+  </button>
+  <button id="btnShot">
+    <span class="ic">📷</span><span class="lb">看屏幕</span>
+  </button>
+  <button id="btnCancel">
+    <span class="ic">✕</span><span class="lb">取消关机</span>
+  </button>
+</div>
+
+<div class="say">
+  <input id="msg" placeholder="跟它说点什么…" autocomplete="off" enterkeyhint="send">
+  <button id="btnSend"><span class="ic">↑</span></button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="shot" id="shotView"><img id="shotImg" alt="屏幕截图"><div class="close" id="shotClose">✕</div></div>
+
+<div class="gate" id="gate">
+  <h2>需要访问口令</h2>
+  <p>在地址后面带上 <code>?t=口令</code> 打开一次即可，之后会记住。</p>
+  <input id="gateInput" placeholder="粘贴口令" autocomplete="off">
+  <button id="gateOk">进去</button>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  /* ---------------- 口令 ---------------- */
+  const params = new URLSearchParams(location.search);
+  let token = params.get('t') || localStorage.getItem('desk_token') || '';
+  if (params.get('t')) {
+    localStorage.setItem('desk_token', params.get('t'));
+    // 把口令从地址栏抹掉，免得被截图/分享带出去
+    history.replaceState(null, '', location.pathname);
+  }
+  const gate = document.getElementById('gate');
+  if (!token) gate.classList.add('show');
+  document.getElementById('gateOk').onclick = () => {
+    const v = document.getElementById('gateInput').value.trim();
+    if (!v) return;
+    token = v;
+    localStorage.setItem('desk_token', v);
+    gate.classList.remove('show');
+    tick();
+  };
+  // 路径一律相对：页面挂在 nginx 的 /desk/ 下，绝对路径会掉到站点根去
+  const api = (p) => p + (p.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(token);
+
+  /* ---------------- 桌宠动画 ---------------- */
+  // 雪碧图 1536×1872，8 列 × 9 行，单帧 192×208；行含义与渲染端 src/renderer/pet/pet.js 一致
+  const FW = 192, FH = 208;
+  const ANIM = {
+    idle:   { row: 0, frames: 6, fps: 7  },
+    walk_r: { row: 1, frames: 8, fps: 12 },
+    walk_l: { row: 2, frames: 8, fps: 12 },
+    sleep:  { row: 3, frames: 4, fps: 3.5 },
+    sit:    { row: 4, frames: 5, fps: 5  },
+    sad:    { row: 5, frames: 8, fps: 9  },
+    stand:  { row: 6, frames: 6, fps: 5  },
+    think:  { row: 7, frames: 6, fps: 8  },
+    happy:  { row: 8, frames: 6, fps: 13 }
+  };
+  const cvs = document.getElementById('pet');
+  const ctx = cvs.getContext('2d');
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  cvs.width = FW * dpr;
+  cvs.height = FH * dpr;
+  ctx.scale(dpr, dpr);
+
+  const sheet = new Image();
+  let loaded = false;
+  sheet.onload = () => { loaded = true; };
+  sheet.src = 'spritesheet.webp';
+
+  let cur = 'idle', frame = 0, last = 0, holdUntil = 0;
+  function draw(t) {
+    if (loaded) {
+      const a = ANIM[cur] || ANIM.idle;
+      if (!holdUntil || t > holdUntil) {
+        if (t - last > 1000 / a.fps) {
+          frame = (frame + 1) % a.frames;
+          last = t;
+        }
+      }
+      ctx.clearRect(0, 0, FW, FH);
+      ctx.drawImage(sheet, frame * FW, a.row * FH, FW, FH, 0, 0, FW, FH);
+    }
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+
+  // 临时做个动作，做完回 idle
+  function play(name, ms) {
+    cur = name; frame = 0; last = 0;
+    holdUntil = performance.now() + (ms || 1400);
+    setTimeout(() => { if (cur === name) { cur = online ? 'idle' : 'sleep'; } }, ms || 1400);
+  }
+  cvs.addEventListener('click', () => {
+    if (!online) return play('sad', 1200);
+    play('happy', 900);
+    say('嗯？');
+  });
+
+  /* ---------------- 气泡 / 提示 ---------------- */
+  const bubble = document.getElementById('bubble');
+  let bubbleTimer = null;
+  function say(text) {
+    if (!text) return;
+    bubble.textContent = text;
+    bubble.classList.add('show');
+    clearTimeout(bubbleTimer);
+    // 字多的停久一点，但别超过 12 秒
+    bubbleTimer = setTimeout(() => bubble.classList.remove('show'),
+      Math.min(12000, 2600 + text.length * 90));
+  }
+  const toastEl = document.getElementById('toast');
+  let toastTimer = null;
+  function toast(text, bad) {
+    toastEl.textContent = text;
+    toastEl.classList.toggle('bad', !!bad);
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2600);
+  }
+
+  /* ---------------- 状态 ---------------- */
+  let online = false;
+  let lastSeenResult = 0;
+
+  function setConn(on) {
+    online = on;
+    document.body.classList.toggle('offline', !on);
+    const box = document.getElementById('conn');
+    box.classList.toggle('on', on);
+    document.getElementById('connTxt').textContent = on ? '在线' : '离线';
+    if (!on) { cur = 'sleep'; frame = 0; }
+    else if (cur === 'sleep') { cur = 'idle'; frame = 0; }
+  }
+
+  function render(state) {
+    setConn(!!state.online);
+    const info = state.info || {};
+    document.getElementById('host').textContent = state.host ? '· ' + state.host : '';
+
+    const bat = info.battery;
+    document.getElementById('bat').textContent = bat == null ? '--' : Math.round(bat);
+    document.getElementById('batBar').style.width = (bat == null ? 0 : Math.max(0, Math.min(100, bat))) + '%';
+    document.getElementById('batBar').style.background = bat != null && bat < 20 ? 'var(--bad)' : 'var(--accent)';
+
+    const cpu = info.cpu == null ? null : Math.round(info.cpu);
+    document.getElementById('cpu').textContent = cpu == null ? '--' : cpu;
+    document.getElementById('cpuBar').style.width = (cpu || 0) + '%';
+    document.getElementById('cpuBar').style.background = cpu > 85 ? 'var(--bad)' : 'var(--accent)';
+
+    if (info.memUsed != null) {
+      document.getElementById('mem').textContent = info.memUsed.toFixed(1);
+      const memPct = Math.min(100, (info.memUsed / (info.memTotal || 16)) * 100);
+      const bar = document.getElementById('memBar');
+      bar.style.width = memPct + '%';
+      // 这台机常年吃满内存（Docker + 微信 + Electron），超过 90% 标红提醒一下
+      bar.style.background = memPct > 90 ? 'var(--bad)' : 'var(--accent)';
+    }
+    // 插电时电量和电源状态放一起看，一眼知道续航还能撑多久
+    document.getElementById('batK').textContent = info.onAC ? '电量 · 充电中' : '电量';
+
+    // 新结果：说话类直接冒气泡，动作类弹提示
+    for (const r of state.results || []) {
+      if (r.at <= lastSeenResult) continue;
+      lastSeenResult = r.at;
+      if (r.cmd === 'say') {
+        say(r.message || '（没说话）');
+        if (/图|照片|表情/.test(r.message || '')) play('happy', 1000);
+      } else if (r.ok) {
+        if (r.cmd === 'shot' && r.data && r.data.shotId) openShot(r.data.shotId);
+        else toast(r.message || '完成');
+      } else {
+        toast(r.message || '失败', true);
+      }
+    }
+  }
+
+  async function tick() {
+    if (!token) return;
+    try {
+      const r = await fetch(api('api/state'), { cache: 'no-store' });
+      if (r.status === 401) {
+        localStorage.removeItem('desk_token');
+        token = '';
+        gate.classList.add('show');
+        return;
+      }
+      render(await r.json());
+    } catch (e) {
+      setConn(false);
+    }
+  }
+  tick();
+  setInterval(tick, 2500);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+
+  /* ---------------- 指令 ---------------- */
+  async function send(cmd, args) {
+    try {
+      const r = await fetch(api('api/cmd'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd, args: args || {} })
+      });
+      const d = await r.json();
+      if (d.error) return toast('口令无效', true);
+      if (!d.online) toast('电脑当前离线，指令先排着');
+      return d;
+    } catch (e) {
+      toast('发不出去：' + e.message, true);
+    }
+  }
+
+  // 关机/重启要连点两次，第一次只是武装；5 秒没点自动收回
+  function arm(btn, cmd, text) {
+    const lb = btn.querySelector('.lb');
+    const old = lb.textContent;
+    let timer = null;
+    btn.onclick = async () => {
+      if (!btn.classList.contains('armed')) {
+        btn.classList.add('armed');
+        lb.textContent = text;
+        timer = setTimeout(() => {
+          btn.classList.remove('armed');
+          lb.textContent = old;
+          btn.onclick = null;
+          arm(btn, cmd, text);
+        }, 5000);
+        return;
+      }
+      clearTimeout(timer);
+      btn.classList.remove('armed');
+      lb.textContent = old;
+      btn.onclick = null;
+      arm(btn, cmd, text);
+      await send(cmd);
+      toast(cmd === 'shutdown' ? '已发出关机，15 秒内还能取消' : '正在重启');
+    };
+  }
+  arm(document.getElementById('btnShutdown'), 'shutdown', '再点确认');
+  arm(document.getElementById('btnRestart'), 'restart', '再点确认');
+
+  document.getElementById('btnSleep').onclick = async () => { await send('sleep'); play('sleep', 4000); toast('已让电脑睡眠'); };
+  document.getElementById('btnLock').onclick = async () => { await send('lock'); toast('已锁屏'); };
+  document.getElementById('btnCancel').onclick = async () => { await send('cancel'); toast('已取消关机'); };
+  document.getElementById('btnShot').onclick = async () => {
+    toast('正在抓屏…');
+    play('think', 2500);
+    await send('shot');
+  };
+
+  const input = document.getElementById('msg');
+  async function submit() {
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    say(text); // 先把自己说的显示出来，别像石沉大海
+    play('think', 6000);
+    await send('say', { text });
+  }
+  document.getElementById('btnSend').onclick = submit;
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+
+  /* ---------------- 截图查看 ---------------- */
+  function openShot(id) {
+    document.getElementById('shotImg').src = api('api/shot/' + id);
+    document.getElementById('shotView').classList.add('show');
+  }
+  document.getElementById('shotClose').onclick = () => {
+    document.getElementById('shotView').classList.remove('show');
+    document.getElementById('shotImg').src = '';
+  };
+})();
+</script>
+</body>
+</html>

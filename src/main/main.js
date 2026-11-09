@@ -6,6 +6,7 @@ const { app, ipcMain, shell, screen } = require('electron');
 const config = require('../core/config');
 const agent = require('../core/agent');
 const reminder = require('../core/tools/reminder');
+const remote = require('./remote');
 const memory = require('../core/tools/memory');
 const windows = require('./windows');
 const wander = require('./wander');
@@ -325,6 +326,7 @@ function quitApp() {
   global.__quitting = true;
   try {
     wander.stop();
+    remote.stop();
   } catch {
     /* ignore */
   }
@@ -344,6 +346,12 @@ app.whenReady().then(() => {
   // 不拉 NapCat、不拉微信客户端、不连 OneBot WS、不刷值守状态，也没有微信看门狗。
   // 同一时间只允许一边值守——本地再起一套会和服务器抢同一个号、重复回复、主动消息双发。
   // 想临时回退到本地：把 server 上 qqbot 容器停掉，再按 git 历史恢复这里的接线。
+
+  // 手机控制端：电脑主动连出去（长轮询），手机经服务器下发指令。
+  // 方向是「电脑 → 服务器」，所以不需要公网 IP、不用路由器端口映射。
+  // 页面托管在服务器上，因为电脑关机时手机也得能打开、看到「离线」。
+  remote.setSayHandler(handleUserMessage);
+  dbg('[remote] 启动:', JSON.stringify(remote.start()));
 
   // 聊天归档预热：服务器上的 .data/archive 拉到本地，之后「问上周跟谁聊了啥」
   // 走本地文件（毫秒级），不用每次等 SSH 往返。拉失败不打扰用户，查询时会再试。

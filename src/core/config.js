@@ -85,6 +85,16 @@ const DEFAULT_CONFIG = {
     // 本地桌宠不再提供微信服务（值守在服务器上），默认不拉起客户端。
     // 这个字段只有回退到本地值守时才有意义。
     autostart: false
+  },
+
+  // 手机远程控制。电脑当被控端，主动连服务器（长轮询），
+  // 所以不需要公网 IP 和端口映射；手机打开服务器上的页面下发指令。
+  // 填好 base + token 之后把 enabled 改成 true，重启桌宠即可。
+  remote: {
+    enabled: false,
+    base: '', // 例：http://xingyan.cloud/desk
+    token: '', // 与服务端 DESK_AGENT_TOKEN 一致
+    name: '' // 手机上显示的名字，空则用主机名
   }
 };
 
