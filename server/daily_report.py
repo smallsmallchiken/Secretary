@@ -529,9 +529,16 @@ def render_markdown(day, msgs, todos, summary, gallery, note):
         L.append('| 时间 | 平台 | 会话 | 类型 | 转写/描述 | 文件 |')
         L.append('|---|---|---|---|---|---|')
         for f in gallery:
-            L.append('| %s | %s | %s | %s | %s | `%s` |' % (
+            # 清单目录要能整包拷走离线看，所以给的是 media/ 里的相对链接，
+            # 不是服务器上的源绝对路径（后者拷走后必然失效，还把目录结构暴露出去）。
+            if f['local']:
+                cell = '[`%s`](media/%s)' % (f['local'], f['local'])
+            else:
+                cell = '`%s`（超过 %dMB，未随清单复制）' % (
+                    os.path.basename(f['path']), MAX_MEDIA_COPY // 1024 // 1024)
+            L.append('| %s | %s | %s | %s | %s | %s |' % (
                 f['time'], f['platform'], f['chat'], f['label'],
-                (f.get('desc') or '—').replace('|', '/'), f['path']))
+                (f.get('desc') or '—').replace('|', '/'), cell))
         L.append('')
     L.append('---')
     L.append('生成时间：%s（北京时间）' % bj_stamp())
@@ -632,10 +639,16 @@ def render_html(day, msgs, todos, summary, gallery, note):
         P.append('<h2>三、媒体文件清单</h2><table><tr><th>时间</th><th>平台</th>'
                  '<th>会话</th><th>类型</th><th>转写/描述</th><th>文件</th></tr>')
         for f in gallery:
+            if f['local']:
+                cell = '<a href="media/%s" target="_blank"><code>%s</code></a>' % (
+                    E(f['local']), E(f['local']))
+            else:
+                cell = '<code>%s</code>（超过 %dMB，未随清单复制）' % (
+                    E(os.path.basename(f['path'])), MAX_MEDIA_COPY // 1024 // 1024)
             P.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
-                     '<td><code>%s</code></td></tr>' % (
+                     '<td>%s</td></tr>' % (
                          f['time'], E(f['platform']), E(str(f['chat'])), E(f['label']),
-                         E(str(f.get('desc') or '—')), E(f['path'])))
+                         E(str(f.get('desc') or '—')), cell))
         P.append('</table>')
     P.append('<footer>生成于 %s（北京时间）· 勾选状态保存在本浏览器</footer>' % bj_stamp())
     P.append('''<script>
