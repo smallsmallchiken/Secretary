@@ -11,6 +11,32 @@ function pad(n) {
   return String(n).padStart(2, '0');
 }
 
+/**
+ * 电源类操作的硬闸门：默认关闭，只有 config 里 power.allow === true 才放行。
+ *
+ * 为什么要有这道闸：关机/重启/睡眠是**不可撤销**的（关机有 15 秒缓冲可以 /a 取消，
+ * 但睡眠和重启基本没救），而这台机器一旦黑了，人在外面连电源键都按不到。
+ * 所以「能不能做」不能由调用方（模型、手机页面、测试脚本）决定，
+ * 只能由用户在配置文件里显式打开。任何一次失败的「先排程再取消」验证都可能把机器关掉。
+ */
+function powerAllowed() {
+  try {
+    // 懒 require：system.js 被 tools 层广泛引用，顶层引 config 容易绕成环
+    const c = require('../config').get('power', {}) || {};
+    return c.allow === true;
+  } catch {
+    return false;
+  }
+}
+
+function assertPower(what) {
+  if (!powerAllowed()) {
+    throw new Error(
+      `电源操作已禁用（${what}）：需要把 .data/config.json 里 power.allow 改成 true 才会执行`
+    );
+  }
+}
+
 function nowText() {
   const d = new Date();
   const week = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()];
@@ -24,6 +50,7 @@ async function run(action, args = {}) {
       return { ok: true, message: `现在是 ${nowText()}` };
 
     case 'shutdown': {
+      assertPower('关机');
       // 留 15 秒缓冲：手机上点错还有机会用「取消关机」救回来（shutdown /a）
       const sec = Math.max(0, Math.min(600, Number(args.delay) || 15));
       spawn('shutdown.exe', ['/s', '/t', String(sec), '/c', '远程关机'], {
@@ -34,6 +61,7 @@ async function run(action, args = {}) {
     }
 
     case 'restart': {
+      assertPower('重启');
       const sec = Math.max(0, Math.min(600, Number(args.delay) || 15));
       spawn('shutdown.exe', ['/r', '/t', String(sec), '/c', '远程重启'], {
         detached: true,
@@ -53,13 +81,15 @@ async function run(action, args = {}) {
       return { ok: true, message: '已取消关机' };
     }
 
-    case 'sleep':
+    case 'sleep': {
+      assertPower('睡眠');
       // hibernate 未启用，这个调用走的是 S0 待机。detached 是必须的：进程要活到自己被挂起
       spawn('rundll32.exe', ['powrprof.dll,SetSuspendState', '0,1,0'], {
         detached: true,
         stdio: 'ignore'
       }).unref();
       return { ok: true, message: '正在睡眠' };
+    }
 
     case 'lock':
       spawn('rundll32.exe', ['user32.dll,LockWorkStation'], { detached: true, stdio: 'ignore' }).unref();
@@ -206,4 +236,4 @@ async function sysinfo() {
   return info;
 }
 
-module.exports = { run, nowText, sysinfo };
+module.exports = { run, nowText, sysinfo, powerAllowed };

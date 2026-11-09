@@ -36,6 +36,18 @@ const MAX_BODY = 8 * 1024 * 1024;
 const MAX_SHOT = 6 * 1024 * 1024;
 const KEEP_SHOTS = 4;
 
+/**
+ * 电源类指令的开关，默认关闭（要开得给容器加 DESK_ALLOW_POWER=1）。
+ *
+ * 两个理由：
+ * 1. 关机 / 重启 / 睡眠是**不可撤销**的，电脑黑了人可能连电源键都按不到；
+ * 2. 指令是排队的——电脑离线时点的「关机」会留在队列里，等它半小时后上线才执行。
+ *    用户早忘了自己点过，一开机又被关掉，这叫事故不叫功能。
+ * 所以默认一律拒绝，连队列都不进。
+ */
+const ALLOW_POWER = process.env.DESK_ALLOW_POWER === '1';
+const POWER_CMDS = new Set(['shutdown', 'restart', 'sleep']);
+
 /** 服务端唯一的共享状态。进程重启就清空，本来也只是几分钟内的缓存 */
 const state = {
   seq: 0, // 指令序号，只增不减
@@ -130,7 +142,11 @@ function pushResult(r) {
 function dropStale() {
   const now = Date.now();
   const before = state.queue.length;
-  state.queue = state.queue.filter((c) => now - c.at < 300000);
+  state.queue = state.queue.filter((c) => {
+    // 电源指令的时间窗更短：电脑离线时点的「关机」不该等它上线才执行
+    const ttl = POWER_CMDS.has(c.cmd) ? 60000 : 300000;
+    return now - c.at < ttl;
+  });
   if (before !== state.queue.length) {
     console.log(`[desk] 丢弃 ${before - state.queue.length} 条过期指令`);
   }
@@ -186,6 +202,7 @@ async function handle(req, res) {
       info: state.agent.info,
       seq: state.seq,
       pending: state.queue.length,
+      power: ALLOW_POWER,
       results: Object.values(state.results).sort((a, b) => a.at - b.at)
     });
   }
@@ -200,6 +217,13 @@ async function handle(req, res) {
     }
     const cmd = String(body.cmd || '').trim();
     if (!cmd) return json(res, 400, { error: 'no cmd' });
+    if (POWER_CMDS.has(cmd) && !ALLOW_POWER) {
+      console.log(`[desk] 拒绝电源指令 ${cmd}（DESK_ALLOW_POWER 未开启）`);
+      return json(res, 403, {
+        error: 'power-disabled',
+        message: '电源操作还没开启，这一步不会执行'
+      });
+    }
     dropStale();
     const item = { id: ++state.seq, cmd, args: body.args || {}, at: Date.now() };
     state.queue.push(item);

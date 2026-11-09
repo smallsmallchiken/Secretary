@@ -298,6 +298,15 @@
   /* ---------------- 状态 ---------------- */
   let online = false;
   let lastSeenResult = 0;
+  let primed = false;
+
+  // 电源三键默认是锁着的：服务端 DESK_ALLOW_POWER 没开就一直是禁用态。
+  // 先把 disabled 设上，别等第一次 state 回来——那 2.5 秒里点到就发出去了
+  const powerBtns = ['btnShutdown', 'btnRestart', 'btnSleep'].map((id) => document.getElementById(id));
+  for (const b of powerBtns) b.disabled = true;
+  function applyPower(on) {
+    for (const b of powerBtns) b.disabled = !on;
+  }
 
   function setConn(on) {
     online = on;
@@ -313,6 +322,7 @@
     setConn(!!state.online);
     const info = state.info || {};
     document.getElementById('host').textContent = state.host ? '· ' + state.host : '';
+    applyPower(state.power === true);
 
     const bat = info.battery;
     document.getElementById('bat').textContent = bat == null ? '--' : Math.round(bat);
@@ -336,7 +346,15 @@
     document.getElementById('batK').textContent = info.onAC ? '电量 · 充电中' : '电量';
 
     // 新结果：说话类直接冒气泡，动作类弹提示
-    for (const r of state.results || []) {
+    const results = state.results || [];
+    if (!primed) {
+      // 首屏只对齐到最新一条，不重放历史：服务器会缓存最近 40 条结果，
+      // 全放一遍的话一打开页面就会连弹十几个提示、还自动弹出上次那张截图
+      lastSeenResult = results.length ? results[results.length - 1].at : 0;
+      primed = true;
+      return;
+    }
+    for (const r of results) {
       if (r.at <= lastSeenResult) continue;
       lastSeenResult = r.at;
       if (r.cmd === 'say') {
@@ -379,6 +397,10 @@
         body: JSON.stringify({ cmd, args: args || {} })
       });
       const d = await r.json();
+      if (d.error === 'power-disabled') {
+        toast(d.message || '电源操作未开启', true);
+        return d;
+      }
       if (d.error) return toast('口令无效', true);
       if (!d.online) toast('电脑当前离线，指令先排着');
       return d;
@@ -409,16 +431,28 @@
       lb.textContent = old;
       btn.onclick = null;
       arm(btn, cmd, text);
-      await send(cmd);
+      const d = await send(cmd);
+      if (!d || d.error) return; // 服务端拒绝了就别报「已发出」
       toast(cmd === 'shutdown' ? '已发出关机，15 秒内还能取消' : '正在重启');
     };
   }
   arm(document.getElementById('btnShutdown'), 'shutdown', '再点确认');
   arm(document.getElementById('btnRestart'), 'restart', '再点确认');
 
-  document.getElementById('btnSleep').onclick = async () => { await send('sleep'); play('sleep', 4000); toast('已让电脑睡眠'); };
-  document.getElementById('btnLock').onclick = async () => { await send('lock'); toast('已锁屏'); };
-  document.getElementById('btnCancel').onclick = async () => { await send('cancel'); toast('已取消关机'); };
+  document.getElementById('btnSleep').onclick = async () => {
+    const d = await send('sleep');
+    if (!d || d.error) return;
+    play('sleep', 4000);
+    toast('已让电脑睡眠');
+  };
+  document.getElementById('btnLock').onclick = async () => {
+    const d = await send('lock');
+    if (d && !d.error) toast('已锁屏');
+  };
+  document.getElementById('btnCancel').onclick = async () => {
+    const d = await send('cancel');
+    if (d && !d.error) toast('已取消关机');
+  };
   document.getElementById('btnShot').onclick = async () => {
     toast('正在抓屏…');
     play('think', 2500);

@@ -113,6 +113,8 @@ async function execOne(c) {
       case 'sleep': {
         // 睡眠是立刻挂起，进程可能在结果发出去之前就冻住。
         // 所以先把「正在睡眠」报上去，隔一会儿再真的睡。
+        // 闸门要先查：等 setTimeout 里才失败的话，手机已经收到「正在睡眠」了
+        if (!system.powerAllowed()) throw new Error('电源操作已禁用（power.allow 不是 true）');
         ok = true;
         message = '正在睡眠';
         setTimeout(() => {
