@@ -274,8 +274,19 @@ async function handle(req, res) {
     const pick = () => state.queue.filter((c) => c.id > since);
     let ready = pick();
     if (ready.length) {
-      state.queue = state.queue.filter((c) => c.id > since);
+      // 注意：这里**不**把指令移出队列。移出 = 认定「已送达」，而响应可能死在半路
+      // （nginx 掐断、手机热点掉线），那样指令就永久丢了——实测丢过一条静音指令：
+      // 服务端 pending 归零、电脑端日志里根本没有那一条。
+      // 真正的出队点是 /agent/result：电脑端把结果报回来才删。重复投递不会发生，
+      // 因为电脑端执行完就把 since 推到该 id，下次 poll 只会取更新的。
       return json(res, 200, { cmds: ready });
+    }
+
+    // 调试/测试用：不挂起，立刻回一个空列表。否则想确认「队列确实空了」
+    // 就得陪着等 25 秒长轮询。
+    if (url.searchParams.get('nowait') === '1') {
+      state.agent.lastSeen = Date.now();
+      return json(res, 200, { cmds: [], now: Date.now(), nowait: true });
     }
 
     let done = false;
@@ -286,7 +297,6 @@ async function handle(req, res) {
       clearTimeout(timer);
       waiters.delete(finish);
       const got = pick();
-      state.queue = state.queue.filter((c) => c.id > since);
       state.agent.lastSeen = Date.now();
       json(res, 200, { cmds: got, now: Date.now() });
     };
@@ -327,8 +337,12 @@ async function handle(req, res) {
       return json(res, 400, { error: e.message });
     }
     state.agent.lastSeen = Date.now();
+    const id = Number(body.id) || 0;
+    // 指令的正式出队点就在这里：电脑端把执行结果报回来才算送达。
+    // poll 只负责投递，不删——响应丢了还能在下一轮重新取到。
+    state.queue = state.queue.filter((c) => c.id !== id);
     pushResult({
-      id: Number(body.id) || 0,
+      id,
       cmd: String(body.cmd || ''),
       ok: !!body.ok,
       message: String(body.message || '').slice(0, 600),

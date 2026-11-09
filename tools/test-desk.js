@@ -180,6 +180,28 @@ async function main() {
     const after = await request(port, `/api/cmd?t=${TOKEN}`, 'POST', { cmd: 'shot' });
     check('对齐后新指令 id 大于 since', !!(after.json && after.json.id > 99), JSON.stringify(after.json));
     console.log('  （这条新指令不会被电脑取走：它的 since=99 已经越过 100）');
+
+    console.log('\n[5] 投递不丢指令');
+    const sent = await request(port, `/api/cmd?t=${TOKEN}`, 'POST', { cmd: 'say', args: { text: '测试' } });
+    const cid = sent.json.id;
+    const p1 = await request(port, `/agent/poll?t=${AGENT}&since=${cid - 1}&nowait=1`, 'GET');
+    check('poll 取到了', !!(p1.json && (p1.json.cmds || []).some((c) => c.id === cid)));
+    const p2 = await request(port, `/agent/poll?t=${AGENT}&since=${cid - 1}&nowait=1`, 'GET');
+    check(
+      '响应丢了再 poll 还能取到（不能先出队）',
+      !!(p2.json && (p2.json.cmds || []).some((c) => c.id === cid))
+    );
+    await request(port, `/agent/result?t=${AGENT}`, 'POST', {
+      id: cid,
+      cmd: 'say',
+      ok: true,
+      message: '测试'
+    });
+    const p3 = await request(port, `/agent/poll?t=${AGENT}&since=${cid - 1}&nowait=1`, 'GET');
+    check(
+      '报回执后才真正出队',
+      !!(p3.json && !(p3.json.cmds || []).some((c) => c.id === cid))
+    );
   } finally {
     child.kill();
     await sleepMs(200);
