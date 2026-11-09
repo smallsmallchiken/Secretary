@@ -32,6 +32,17 @@ Windows 桌面宠（Electron），带可被 LLM 调用的工具层。核心是"�
 - 服务器上是完整 QQ 机器人（NapCat + OneBot WS + 主动消息调度），细节见 `server/README.md`；
   服务器上 NapCat 的坑（配置匿名卷、安全组、扫码）见 `.workbuddy/memory/2026-10-30.md`。
 
+### 手机端（`server/desk/` + `android/`）
+
+- 手机遥控电脑：浏览器 `http://8.139.252.197/desk/?t=<pageToken>` 就能用；APK 是同一个
+  页面的 WebView 壳，服务端 `/desk.apk` 直接下发。
+- **页面改了不用重新打包**（内容由服务端下发），只有改壳子、换地址、换口令才需要
+  `python tools/build-apk.py`，产物是 `dist/desk.apk`。构建细节见 `android/README.md`。
+- 两把钥匙别混：`remote.token` 是**电脑端**向服务器注册用的（服务端 `DESK_AGENT_TOKEN`），
+  `remote.pageToken` 是**手机页面/APK** 打开控制页用的（服务端 `DESK_TOKEN`）。打 APK 读后者。
+- 签名密钥 `android/keystore.jks` 已 gitignore，**丢了就只能卸载重装**（换签名覆盖装会报
+  「应用未安装」）。
+
 ## 聊天归档与记事（`remember` / `recall`）
 
 用户要「帮我记事，后面我直接问就行」，所以有两条数据线，**存法不同、用途不同**：
