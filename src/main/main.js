@@ -9,6 +9,7 @@ const reminder = require('../core/tools/reminder');
 const remote = require('./remote');
 const memory = require('../core/tools/memory');
 const memo = require('../core/memo');
+const mediaReceived = require('../core/media/received');
 const windows = require('./windows');
 const wander = require('./wander');
 const { createTray, refreshTray } = require('./tray');
@@ -292,6 +293,43 @@ function registerIpc() {
     return { ok: !err, error: err || '', path: p };
   });
 
+  /* ---------------- 素材库（收到的图片/表情/语音/文件） ---------------- */
+  ipcMain.handle('media:list', (_e, opts) => mediaReceived.list(opts || {}));
+  ipcMain.handle('media:close', () => windows.hideMedia());
+  ipcMain.handle('media:open-dir', async () => {
+    const fs = require('fs');
+    const d = mediaReceived.dir();
+    if (!fs.existsSync(d)) {
+      return { ok: false, error: '素材库目录还没生成（服务器还没收到过媒体）' };
+    }
+    const err = await shell.openPath(d);
+    if (err) dbg('[media] 打开目录失败:', err);
+    return { ok: !err, error: err || '', path: d };
+  });
+  // 「同步」= 从服务器拉最新素材（索引 + 图片原文件），可能慢，放异步
+  ipcMain.handle('media:sync', () => {
+    const fs = require('fs');
+    const { spawnSync } = require('child_process');
+    const script = path.join(app.getAppPath(), 'tools', 'sync-media.py');
+    if (!fs.existsSync(script)) return { ok: false, message: '缺少 tools/sync-media.py' };
+    try {
+      const r = spawnSync('python', [script], {
+        cwd: app.getAppPath(),
+        timeout: 60000,
+        windowsHide: true,
+        encoding: 'utf8'
+      });
+      if (r.error) throw r.error;
+      const out = String(r.stdout || '').trim().split('\n');
+      const msg = out[0] || '已同步';
+      dbg('[media] 同步完成:', msg);
+      return { ok: true, message: msg };
+    } catch (err) {
+      dbg('[media] 同步失败:', err.message);
+      return { ok: false, message: '同步失败：' + err.message };
+    }
+  });
+
   ipcMain.handle('app:info', () => ({
     version: app.getVersion(),
     electron: process.versions.electron,
@@ -313,12 +351,24 @@ function buildMenuItems() {
   } catch {
     /* 备忘录取不到时不影响菜单其它项 */
   }
+  // 收到的素材总数也显示出来，右键就知道库里有没有新东西
+  let mediaCount = 0;
+  try {
+    mediaCount = mediaReceived.stats().total;
+  } catch {
+    /* 素材库为空或还没生成时不影响菜单 */
+  }
 
   return [
     {
       id: 'memo',
       label: '备忘录',
       hint: openCount > 0 ? `${openCount} 条待办` : '空'
+    },
+    {
+      id: 'media',
+      label: '素材库',
+      hint: mediaCount > 0 ? `${mediaCount} 个` : '空'
     },
     { sep: true },
     { id: 'wander_toggle', label: '自己漫步', hint: wanderOn ? '开' : '关' },
@@ -352,6 +402,10 @@ function runMenuAction(id) {
           dbg('[memo] 打开时同步失败:', err.message);
         }
       }
+      break;
+    }
+    case 'media': {
+      windows.toggleMedia();
       break;
     }
     case 'walk':

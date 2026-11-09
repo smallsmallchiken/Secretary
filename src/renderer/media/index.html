@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' file: data:" />
+  <title>素材库</title>
+  <link rel="stylesheet" href="media.css" />
+</head>
+<body>
+  <div id="card">
+    <div id="head">
+      <div id="title">素材库</div>
+      <div id="count"></div>
+      <div id="close" title="关闭">×</div>
+    </div>
+
+    <div id="tabs"></div>
+
+    <div id="tools">
+      <input id="q" type="text" placeholder="搜描述 / 标签 / 正文 / 来源…" spellcheck="false" />
+      <button id="btn-refresh" title="从服务器同步最新素材（含图片原文件）">同步</button>
+      <button id="btn-dir" title="打开本地素材库文件夹">文件夹</button>
+    </div>
+
+    <div id="list"></div>
+
+    <div id="empty">
+      <div class="emoji">🗂</div>
+      <div class="tip">素材库还是空的</div>
+      <div class="sub">QQ/微信收到图片、表情包、语音、文件后会自动入库并理解内容</div>
+    </div>
+  </div>
+
+  <!-- 点开大图 -->
+  <div id="viewer" hidden>
+    <div id="viewer-box">
+      <img id="viewer-img" alt="" />
+      <div id="viewer-info"></div>
+    </div>
+  </div>
+
+  <script src="media.js"></script>
+</body>
+</html>

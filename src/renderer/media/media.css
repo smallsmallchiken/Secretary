@@ -1,0 +1,288 @@
+/* 素材库面板：与备忘录同风格的深色卡片，网格看图 */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  color: #eceff5;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#card {
+  position: absolute;
+  inset: 6px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(26, 28, 36, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+/* ---------- 头部 ---------- */
+#head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 14px 16px 8px;
+}
+
+#title { font-size: 15px; font-weight: 600; letter-spacing: 0.3px; }
+
+#count { font-size: 11px; color: #8b93a7; flex: 1; }
+
+#close {
+  align-self: flex-start;
+  width: 20px; height: 20px; line-height: 18px;
+  text-align: center; border-radius: 6px;
+  font-size: 16px; color: #8b93a7; cursor: pointer;
+}
+#close:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+
+/* ---------- 分类 tab ---------- */
+#tabs {
+  display: flex;
+  gap: 6px;
+  padding: 0 16px 8px;
+  flex-wrap: wrap;
+}
+
+.tab {
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #9aa2b6;
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab:hover { background: rgba(255, 255, 255, 0.1); color: #dfe4ee; }
+.tab.on { background: rgba(96, 150, 255, 0.26); color: #cfe0ff; }
+.tab .n { font-size: 10px; opacity: 0.7; margin-left: 3px; }
+
+/* ---------- 工具条 ---------- */
+#tools {
+  display: flex;
+  gap: 6px;
+  padding: 0 16px 10px;
+}
+
+#q {
+  flex: 1;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: #eceff5;
+  font-size: 12px;
+  outline: none;
+}
+#q:focus { border-color: rgba(96, 150, 255, 0.55); }
+#q::placeholder { color: #6b7285; }
+
+#tools button {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: #cfd5e3;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+#tools button:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+#tools button:active { transform: translateY(1px); }
+#tools button[disabled] { opacity: 0.5; cursor: default; }
+
+/* ---------- 列表 ---------- */
+#list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 2px 16px 14px;
+}
+#list::-webkit-scrollbar { width: 8px; }
+#list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14); border-radius: 4px;
+}
+
+/* 图片/表情：网格 */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.cell {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  cursor: zoom-in;
+}
+.cell img {
+  width: 100%;
+  height: 100%;
+  /* 素材要看清整张内容：cover 会把图裁掉一半，截图/长图尤其明显 */
+  object-fit: contain;
+  background: rgba(0, 0, 0, 0.28);
+  display: block;
+}
+.cell .cap {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  padding: 12px 5px 4px;
+  font-size: 10px;
+  line-height: 1.25;
+  color: #dfe4ee;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.82), rgba(0, 0, 0, 0));
+  max-height: 46px;
+  overflow: hidden;
+}
+.cell .badge {
+  position: absolute;
+  top: 5px; left: 5px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  font-size: 9px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #cfe0ff;
+}
+.cell.missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  color: #6b7285;
+  font-size: 10px;
+  text-align: center;
+  padding: 6px;
+}
+
+/* 语音/文件：行 */
+.rows { display: flex; flex-direction: column; gap: 6px; }
+
+.row {
+  display: flex;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.row:hover { background: rgba(255, 255, 255, 0.08); }
+
+.row .ico {
+  width: 34px; height: 34px;
+  flex: 0 0 34px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  background: rgba(96, 150, 255, 0.16);
+}
+
+.row .body { flex: 1; min-width: 0; }
+
+.row .line1 {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12.5px;
+  color: #eceff5;
+}
+.row .line1 .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row .line1 .sz { font-size: 10px; color: #7c8399; flex: 0 0 auto; }
+
+.row .txt {
+  margin-top: 3px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #b8c0d2;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+}
+
+.row .meta {
+  margin-top: 4px;
+  font-size: 10px;
+  color: #7c8399;
+}
+
+.tags { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
+.tag {
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 9.5px;
+  background: rgba(96, 150, 255, 0.16);
+  color: #a9c4ff;
+}
+
+/* ---------- 空状态 ---------- */
+#empty {
+  flex: 1;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #7c8399;
+  padding-bottom: 30px;
+}
+#empty.show { display: flex; }
+#empty .emoji { font-size: 30px; opacity: 0.55; }
+#empty .tip { font-size: 13px; color: #9aa2b6; }
+#empty .sub { font-size: 11px; max-width: 300px; text-align: center; line-height: 1.5; }
+
+/* ---------- 大图 ---------- */
+#viewer {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.86);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  cursor: zoom-out;
+}
+#viewer[hidden] { display: none; }
+
+#viewer-box {
+  max-width: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+#viewer-img {
+  max-width: 100%;
+  max-height: 460px;
+  border-radius: 10px;
+  background: #111;
+  object-fit: contain;
+}
+#viewer-info {
+  font-size: 11px;
+  color: #b8c0d2;
+  text-align: center;
+  line-height: 1.5;
+  max-width: 480px;
+}

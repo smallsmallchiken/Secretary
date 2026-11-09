@@ -872,6 +872,14 @@ async function start() {
             dbg('[qq] 登录账号:', info && info.user_id, info && info.nickname);
           })
           .catch(() => {});
+        // 监听模式：群消息事件不带群名，连上后拉一次群列表缓存起来，
+        // 否则素材库和归档里全是「谁发的不明」。
+        if (cfg.observeOnly) {
+          observer
+            .primeGroups(client)
+            .then((m) => dbg('[qq][observe] 群名缓存:', Object.keys(m).length, '个'))
+            .catch(() => {});
+        }
       } else if (s === 'disconnected') {
         say('与 NapCat 断开了，正在自动重连');
       }

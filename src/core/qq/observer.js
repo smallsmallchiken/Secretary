@@ -45,6 +45,26 @@ function indexFile(tsSec, platform = 'qq') {
   return path.join(inboxDir(tsSec, platform), 'media-index.jsonl');
 }
 
+/**
+ * 群名缓存：OneBot 的群消息事件里**没有 group_name**，只有 group_id，
+ * 归档的 n 会空着，素材库就变成「谁发的不明」。连上后拉一次群列表补上。
+ * get_group_list 是只读 API，不受 observeOnly 闸门影响。
+ */
+let groupNames = {};
+
+function primeGroups(client) {
+  if (!client || typeof client.callApi !== 'function') return Promise.resolve(groupNames);
+  return client
+    .callApi('get_group_list', {})
+    .then((list) => {
+      for (const g of Array.isArray(list) ? list : []) {
+        if (g && g.group_id != null) groupNames[String(g.group_id)] = String(g.group_name || '');
+      }
+      return groupNames;
+    })
+    .catch(() => groupNames);
+}
+
 /** 从 segment.data 里挑一个能下载的 URL / 本地路径 */
 function mediaUrlOf(seg) {
   const d = (seg && seg.data) || {};
@@ -66,6 +86,25 @@ function mediaNameOf(seg) {
 }
 
 /**
+ * 媒体段的附加属性。素材库要分清「照片」和「表情包」，
+ * 光看 type=image 不够——QQ 的图片段里 sub_type / summary 才是判据：
+ *   summary   "[动画表情]" 之类的现成标签，最可靠
+ *   sub_type  NapCat 里 1=普通图片、6/7 常见于表情与商城表情
+ *   emoji_id  商城表情才有，有它就一定是表情包
+ * 字节数留着给素材库判断「是不是表情小图」和去重成本。
+ */
+function mediaAttrsOf(seg) {
+  const d = (seg && seg.data) || {};
+  const out = {};
+  if (d.sub_type != null) out.st = Number(d.sub_type) || 0;
+  if (d.file_size != null) out.sz = Number(d.file_size) || 0;
+  const em = d.emoji_id || d.emoji_package_id;
+  if (em) out.em = String(em).slice(0, 40);
+  if (d.md5) out.md5 = String(d.md5).slice(0, 40);
+  return out;
+}
+
+/**
  * 把 OneBot 事件转成「完整」归档记录。
  * 文字仍拼进 x；所有段都进 m，连 at / reply 这类非媒体段也记下来，
  * 清单才能看出「谁 @ 了我」「引用了哪条」。
@@ -78,7 +117,10 @@ function fullRecord(event, opts = {}) {
   if (Array.isArray(event.message)) {
     for (const seg of event.message) {
       if (!seg || !seg.type) continue;
-      media.push({ t: seg.type, u: mediaUrlOf(seg), n: mediaNameOf(seg) });
+      media.push(Object.assign(
+        { t: seg.type, u: mediaUrlOf(seg), n: mediaNameOf(seg) },
+        mediaAttrsOf(seg)
+      ));
     }
   } else if (typeof event.message === 'string') {
     media.push({ t: 'text', u: '', n: event.message.slice(0, 1000) });
@@ -150,7 +192,11 @@ async function saveOne(raw, type, base, tsSec) {
  * 下载是 fire-and-forget，绝不阻塞接收主链路（NapCat 事件堆积会掉消息）。
  */
 function capture(event, opts = {}) {
-  const rec = fullRecord(event, opts);
+  const isGroup = event && event.message_type === 'group';
+  const rec = fullRecord(event, Object.assign({}, opts, {
+    // 群消息事件不带群名，用启动时缓存的群列表兜底
+    chatName: opts.chatName || (isGroup && groupNames[String(event.group_id)]) || ''
+  }));
   if (!rec) return null;
   try {
     archive.append(rec);
@@ -173,7 +219,9 @@ function capture(event, opts = {}) {
         const { m, i } = jobs[k];
         rows.push({
           t: rec.t, src: 'qq', mid: rec.mid, id: rec.id, n: rec.n,
-          i, type: m.t, name: m.n, url: m.u, file: f
+          i, type: m.t, name: m.n, url: m.u, file: f,
+          // 素材库判类要用：sub_type / 字节数 / 商城表情 id
+          st: m.st || 0, sz: m.sz || 0, em: m.em || ''
         });
       });
       if (!rows.length) return;
@@ -191,6 +239,6 @@ function capture(event, opts = {}) {
 }
 
 module.exports = {
-  capture, fullRecord, inboxDir, indexFile,
-  mediaUrlOf, mediaNameOf, MEDIA_SEGMENTS
+  capture, fullRecord, inboxDir, indexFile, primeGroups,
+  mediaUrlOf, mediaNameOf, mediaAttrsOf, MEDIA_SEGMENTS
 };

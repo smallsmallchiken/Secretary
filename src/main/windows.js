@@ -579,6 +579,101 @@ function getMemoWindow() {
 }
 
 /* ------------------------------------------------------------------ */
+/* 素材库面板（右键菜单打开，看收到的图片/表情/语音/文件）              */
+/* ------------------------------------------------------------------ */
+
+const MEDIA_W = 568;
+const MEDIA_H = 620;
+let mediaWin = null;
+
+function createMediaWindow() {
+  if (mediaWin && !mediaWin.isDestroyed()) return mediaWin;
+
+  mediaWin = new BrowserWindow({
+    width: MEDIA_W,
+    height: MEDIA_H,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    show: false,
+    webPreferences: {
+      preload: preloadPath('media-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  mediaWin.setAlwaysOnTop(true, 'screen-saver');
+  mediaWin.loadFile(path.join(__dirname, '..', 'renderer', 'media', 'index.html'));
+
+  // 和备忘录一样不做失焦隐藏：素材要一张张翻着看，点别处就收掉会很难用
+  mediaWin.on('closed', () => {
+    mediaWin = null;
+  });
+
+  return mediaWin;
+}
+
+/** 摆到桌宠旁边，逻辑与备忘录共用一套避让规则 */
+function positionMedia(win) {
+  const pb = petWin && !petWin.isDestroyed() ? petWin.getBounds() : null;
+  const wa = pb
+    ? screen.getDisplayMatching(pb).workArea
+    : screen.getPrimaryDisplay().workArea;
+  const gap = 12;
+
+  let x;
+  if (pb) {
+    const right = pb.x + pb.width + gap;
+    x = right + MEDIA_W <= wa.x + wa.width - 8 ? right : pb.x - MEDIA_W - gap;
+  } else {
+    x = wa.x + wa.width - MEDIA_W - 40;
+  }
+  x = Math.max(wa.x + 8, Math.min(x, wa.x + wa.width - MEDIA_W - 8));
+
+  let y = pb
+    ? pb.y + Math.round(pb.height / 2) - Math.round(MEDIA_H / 2)
+    : wa.y + 70;
+  y = Math.max(wa.y + 8, Math.min(y, wa.y + wa.height - MEDIA_H - 8));
+
+  win.setBounds({ x: Math.round(x), y: Math.round(y), width: MEDIA_W, height: MEDIA_H });
+}
+
+function showMedia() {
+  const win = createMediaWindow();
+  positionMedia(win);
+  if (!win.isVisible()) win.show();
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.focus();
+  win.moveTop();
+  return win;
+}
+
+function hideMedia() {
+  if (mediaWin && !mediaWin.isDestroyed()) mediaWin.hide();
+}
+
+function toggleMedia() {
+  if (mediaWin && !mediaWin.isDestroyed() && mediaWin.isVisible()) {
+    hideMedia();
+    return false;
+  }
+  showMedia();
+  return true;
+}
+
+function getMediaWindow() {
+  return mediaWin;
+}
+
+/* ------------------------------------------------------------------ */
 /* 自绘右键菜单（原生 Menu 没法做透明，这里用透明窗口画）               */
 /* ------------------------------------------------------------------ */
 
@@ -712,6 +807,10 @@ module.exports = {
   hideMemo,
   toggleMemo,
   getMemoWindow,
+  showMedia,
+  hideMedia,
+  toggleMedia,
+  getMediaWindow,
   showContextMenu,
   hideContextMenu,
   resizeContextMenu,
