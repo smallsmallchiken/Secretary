@@ -483,6 +483,102 @@ function stepPetScale(factor) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 备忘录面板（右键菜单打开，可打勾确认做完）                            */
+/* ------------------------------------------------------------------ */
+
+const MEMO_W = 420;
+const MEMO_H = 560;
+let memoWin = null;
+
+function createMemoWindow() {
+  if (memoWin && !memoWin.isDestroyed()) return memoWin;
+
+  memoWin = new BrowserWindow({
+    width: MEMO_W,
+    height: MEMO_H,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    show: false,
+    webPreferences: {
+      preload: preloadPath('memo-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  memoWin.setAlwaysOnTop(true, 'screen-saver');
+  memoWin.loadFile(path.join(__dirname, '..', 'renderer', 'memo', 'index.html'));
+
+  // 备忘录**不做失焦自动隐藏**：待办是要一条条看的，点一下别处就收没
+  // 会让人来回重开。关掉只有两条路——面板上的 × 或 Esc。
+  memoWin.on('closed', () => {
+    memoWin = null;
+  });
+
+  return memoWin;
+}
+
+/** 摆到桌宠旁边：优先右侧，放不下翻左侧，垂直跟桌宠居中对齐后夹进工作区 */
+function positionMemo(win) {
+  const pb = petWin && !petWin.isDestroyed() ? petWin.getBounds() : null;
+  const wa = pb
+    ? screen.getDisplayMatching(pb).workArea
+    : screen.getPrimaryDisplay().workArea;
+  const gap = 12;
+
+  let x;
+  if (pb) {
+    const right = pb.x + pb.width + gap;
+    x = right + MEMO_W <= wa.x + wa.width - 8 ? right : pb.x - MEMO_W - gap;
+  } else {
+    x = wa.x + wa.width - MEMO_W - 40;
+  }
+  x = Math.max(wa.x + 8, Math.min(x, wa.x + wa.width - MEMO_W - 8));
+
+  let y = pb
+    ? pb.y + Math.round(pb.height / 2) - Math.round(MEMO_H / 2)
+    : wa.y + 80;
+  y = Math.max(wa.y + 8, Math.min(y, wa.y + wa.height - MEMO_H - 8));
+
+  win.setBounds({ x: Math.round(x), y: Math.round(y), width: MEMO_W, height: MEMO_H });
+}
+
+function showMemo() {
+  const win = createMemoWindow();
+  positionMemo(win);
+  if (!win.isVisible()) win.show();
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.focus();
+  win.moveTop();
+  return win;
+}
+
+function hideMemo() {
+  if (memoWin && !memoWin.isDestroyed()) memoWin.hide();
+}
+
+function toggleMemo() {
+  if (memoWin && !memoWin.isDestroyed() && memoWin.isVisible()) {
+    hideMemo();
+    return false;
+  }
+  showMemo();
+  return true;
+}
+
+function getMemoWindow() {
+  return memoWin;
+}
+
+/* ------------------------------------------------------------------ */
 /* 自绘右键菜单（原生 Menu 没法做透明，这里用透明窗口画）               */
 /* ------------------------------------------------------------------ */
 
@@ -612,6 +708,10 @@ module.exports = {
   sizeForScale,
   snapPetSize,
   movePet,
+  showMemo,
+  hideMemo,
+  toggleMemo,
+  getMemoWindow,
   showContextMenu,
   hideContextMenu,
   resizeContextMenu,

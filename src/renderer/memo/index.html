@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>备忘录</title>
+  <link rel="stylesheet" href="memo.css" />
+</head>
+<body>
+  <div id="card">
+    <div id="head">
+      <div id="title">备忘录</div>
+      <div id="count"></div>
+      <div id="close" title="关闭">×</div>
+    </div>
+
+    <div id="tools">
+      <button id="btn-refresh" title="重新同步清单并重建消息数据库">刷新</button>
+      <button id="btn-db" title="用系统默认程序打开消息数据库">数据库</button>
+      <button id="btn-clear" title="清掉所有已勾选的条目">清已完成</button>
+    </div>
+
+    <div id="list"></div>
+
+    <div id="empty">
+      <div class="emoji">☑</div>
+      <div class="tip">还没有待办</div>
+      <div class="sub">点「刷新」从每日清单里同步，或直接用语音跟我说要记什么</div>
+    </div>
+  </div>
+  <script src="memo.js"></script>
+</body>
+</html>

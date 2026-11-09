@@ -43,6 +43,7 @@ WX_ARCHIVE = os.environ.get('DAILY_WX_ARCHIVE', os.path.join(ROOT, 'archive', 'w
 QQ_INBOX = os.environ.get('DAILY_QQ_INBOX', os.path.join(ROOT, 'inbox'))
 WX_INBOX = os.environ.get('DAILY_WX_INBOX', '/opt/linux-im/inbox')
 CONFIG = os.environ.get('DAILY_CONFIG', os.path.join(ROOT, 'config.json'))
+PROFILE = os.environ.get('DAILY_PROFILE', os.path.join(ROOT, 'profile.json'))
 OUT_DIR = os.environ.get('DAILY_OUT', os.path.join(ROOT, 'daily'))
 
 MODEL = 'deepseek-ai/DeepSeek-V4.1-Flash'
@@ -406,6 +407,36 @@ TODO_PROMPT = '''你是私人秘书，负责把主人当天的 QQ/微信消息�
 没有待办就输出 {"todos":[],"summary":"…"}。'''
 
 
+def profile_block():
+    """主人的背景，用来判断「哪些事跟我有关」。
+
+    读的是**精简版** profile.json（姓名/学校/专业/方向），不含身份证与手机号：
+    完整档案留在本机 .data/profile.md，服务器只放这份必要信息。
+    文件不存在就返回空串，提示词退回原样——不能因为缺档案就不出清单。
+    """
+    try:
+        with open(PROFILE) as f:
+            p = json.load(f)
+    except Exception:
+        return ''
+    if not isinstance(p, dict):
+        return ''
+    bits = []
+    for key, label in (('name', '姓名'), ('school', '学校'), ('major', '专业'),
+                       ('stage', '当前阶段'), ('direction', '研究方向'),
+                       ('skills', '技能'), ('focus', '关注事项')):
+        v = p.get(key)
+        if isinstance(v, list):
+            v = '、'.join([str(x) for x in v if x])
+        if v:
+            bits.append('%s：%s' % (label, v))
+    if not bits:
+        return ''
+    return ('\n\n【主人是谁】\n' + '\n'.join('- ' + b for b in bits) +
+            '\n判断时结合这些背景：与主人学业/科研/求职强相关的事优先；'
+            '广告、刷单、兼职、贷款、陌生推销一律不收进待办。')
+
+
 def call_llm(cfg, flow):
     llm = cfg.get('llm') or {}
     key = llm.get('apiKey') or ''
@@ -415,7 +446,7 @@ def call_llm(cfg, flow):
     body = {
         'model': MODEL,
         'messages': [
-            {'role': 'system', 'content': TODO_PROMPT},
+            {'role': 'system', 'content': TODO_PROMPT + profile_block()},
             {'role': 'user', 'content': '这是今天的全部消息流水：\n\n' + flow}
         ],
         'max_tokens': 1400,

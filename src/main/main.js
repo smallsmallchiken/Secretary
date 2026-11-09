@@ -8,6 +8,7 @@ const agent = require('../core/agent');
 const reminder = require('../core/tools/reminder');
 const remote = require('./remote');
 const memory = require('../core/tools/memory');
+const memo = require('../core/memo');
 const windows = require('./windows');
 const wander = require('./wander');
 const { createTray, refreshTray } = require('./tray');
@@ -254,6 +255,43 @@ function registerIpc() {
 
   ipcMain.handle('app:quit', () => quitApp());
 
+  /* ---------------- 备忘录 ---------------- */
+  ipcMain.handle('memo:list', () => memo.list());
+  ipcMain.handle('memo:toggle', (_e, id) => memo.toggle(String(id || '')));
+  ipcMain.handle('memo:remove', (_e, id) => memo.remove(String(id || '')));
+  ipcMain.handle('memo:clear-done', () => memo.clearDone());
+  ipcMain.handle('memo:close', () => windows.hideMemo());
+
+  // 「刷新」= 先从服务器拉最新每日清单，再并待办 + 重建消息数据库。
+  // 拉清单可能失败（离线 / 服务器重启），失败也要继续用本地已有的跑完整流程，
+  // 否则一次网络抖动就让整个按钮变成不可用。
+  ipcMain.handle('memo:refresh', () => {
+    try {
+      const fs = require('fs');
+      const { spawnSync } = require('child_process');
+      const script = path.join(app.getAppPath(), 'tools', 'sync-daily.py');
+      if (fs.existsSync(script)) {
+        spawnSync('python', [script], {
+          cwd: app.getAppPath(),
+          timeout: 20000,
+          windowsHide: true
+        });
+      }
+    } catch (err) {
+      dbg('[memo] 拉取服务器清单失败（继续用本地）:', err.message);
+    }
+    return memo.refresh();
+  });
+
+  ipcMain.handle('memo:open-database', async () => {
+    const fs = require('fs');
+    const p = memo.dbFile();
+    if (!fs.existsSync(p)) memo.buildDatabase();
+    const err = await shell.openPath(p);
+    if (err) dbg('[memo] 打开数据库失败:', err);
+    return { ok: !err, error: err || '', path: p };
+  });
+
   ipcMain.handle('app:info', () => ({
     version: app.getVersion(),
     electron: process.versions.electron,
@@ -268,8 +306,21 @@ function registerIpc() {
 
 function buildMenuItems() {
   const wanderOn = config.get('behavior.allowWander', true) !== false;
+  // 待办数量直接显示在菜单上，不用点进去才知道有没有事
+  let openCount = 0;
+  try {
+    openCount = memo.stats().open;
+  } catch {
+    /* 备忘录取不到时不影响菜单其它项 */
+  }
 
   return [
+    {
+      id: 'memo',
+      label: '备忘录',
+      hint: openCount > 0 ? `${openCount} 条待办` : '空'
+    },
+    { sep: true },
     { id: 'wander_toggle', label: '自己漫步', hint: wanderOn ? '开' : '关' },
     { id: 'walk', label: '自己溜达一圈' },
     { sep: true },
@@ -288,6 +339,19 @@ function runMenuAction(id) {
       windows.sendToPet('pet:config', cfg);
       wander.refresh();
       dbg('[wander] 菜单切换为', next ? '允许漫步' : '禁止漫步');
+      break;
+    }
+    case 'memo': {
+      const shown = windows.toggleMemo();
+      // 打开时顺手把清单里的新待办并进来（本地几毫秒，不联网）。
+      // 要连服务器拉最新清单就点面板上的「刷新」。
+      if (shown) {
+        try {
+          memo.syncFromDaily();
+        } catch (err) {
+          dbg('[memo] 打开时同步失败:', err.message);
+        }
+      }
       break;
     }
     case 'walk':
