@@ -109,8 +109,11 @@ lastProactiveAt / lastRevisitAt / proactiveDay / slotFired`。老状态没有这
 ## 手机控制端（`/desk`）
 
 手机浏览器打开 `http://8.139.252.197/desk/?t=<页面口令>`，加一次口令就记在 localStorage。
-页面是静态的，托管在 `desk` 容器（`server/desk/server.js`，零依赖纯 Node，8765 只监听回环，
-nginx 把 `/desk/` 反代过去）。
+`dist/desk.apk` 是同一个页面的 WebView 壳，见 `android/README.md`。
+
+**页面只有三块：桌宠、今天的待办、对话框。** 关机 / 重启 / 睡眠 / 锁屏 / 截屏 / 音量 /
+切歌 / 打开应用那些键都撤掉了——在外面真正会用的只有「让桌宠动一下」和「看一眼还有什么事」，
+多一个按钮就多一处维护、多一个点错的机会。要加功能先确认再加。
 
 方向是**反的**：电脑主动连出去长轮询（25 秒挂起，有指令立刻回），所以不需要公网 IP、
 不需要端口映射、不怕运营商封 80。
@@ -119,26 +122,35 @@ nginx 把 `/desk/` 反代过去）。
 
 | 口令 | 谁用 | 在哪 |
 |---|---|---|
-| 页面口令 | 手机（读写状态、下指令、拉截图） | `DESK_TOKEN` |
-| 电脑口令 | 桌上的机器（取指令、上报状态、传截图） | `DESK_AGENT_TOKEN` + 本地 `.data/config.json` 的 `remote.token` |
+| 页面口令 | 手机（读状态、下指令） | `DESK_TOKEN` + 本地 `remote.pageToken` |
+| 电脑口令 | 桌上的机器（取指令、上报状态、取清单） | `DESK_AGENT_TOKEN` + 本地 `remote.token` |
 
-指令清单：`shutdown` / `restart` / `sleep` / `lock` / `cancel` / `shot` / `say` /
-`media`（音量、静音、切歌）/ `openapp`（走本地 `appAliases`）。应用按钮的列表由电脑端
-每 8 秒上报，服务端不硬编码。
+指令只有四个：
 
-### 电源操作默认是关的，要开得两处同时开
+| 指令 | 作用 |
+|---|---|
+| `say` | 把手机上的话转给桌宠的对话入口，回复挂在 results 里 |
+| `pet` | `{action:'poke'}` 戳一下（开心 + 冒个「嗯？」）；`{action:'walk'}` 溜达一圈 |
+| `memotoggle` | `{id}` 勾选 / 取消一条待办，写电脑上的 `.data/memo.json` |
+| `memorefresh` | 立刻去服务器拉一次今日清单 |
 
-关机 / 重启 / 睡眠**不可撤销**，而且人可能在外面连电源键都按不到。所以做了三层闸，
-任何一层开着都不会执行：
+备忘录这条链路：电脑端每 3.5 秒把待办清单上报给 `/agent/report`（手机每 2 秒轮询状态），
+清单原文每 60 秒从 `/api/daily` 取一次（服务端读 `/opt/secretary/.data/daily/<天>/daily.md`，
+按北京时区分天），落盘到本地 `.data/daily/<天>/daily.md` 后交给 `memo.parseDaily` 解析
+——解析只有这一份实现，服务和桌宠不会各自长歪。
+
+内容没变就不重新解析：清单每小时会被 cron 重跑一次，每次都重解析会把用户勾掉的
+冲回未完成。
+
+### 电源操作默认是关的（页面上已经没有按钮，闸门仍然保留）
+
+关机 / 重启 / 睡眠**不可撤销**，而且人可能在外面连电源键都按不到。三层闸，任何一层关着都不会执行：
 
 | 层 | 位置 | 默认 |
 |---|---|---|
 | 模型工具 | `src/core/tools/index.js` 里没有 power 工具 | 无 |
 | 桌面执行 | `.data/config.json` 的 `power.allow` | `false` |
 | 手机服务端 | desk 容器的 `DESK_ALLOW_POWER=1` | 未设 |
-
-只开一层仍然会被拒（服务端直接 403，指令连队列都不进）。确认要开了，两处都改，
-然后 `docker restart desk`。
 
 **别拿真机验证关机。** 上一版验证方式是「排程 600 秒再 `/a` 取消」，任何一步失败机器就黑了。
 要验就跑 `node tools/test-power.js`（把 `child_process.spawn` 换成假函数）和

@@ -36,6 +36,8 @@ Windows 桌面宠（Electron），带可被 LLM 调用的工具层。核心是"�
 
 - 手机遥控电脑：浏览器 `http://8.139.252.197/desk/?t=<pageToken>` 就能用；APK 是同一个
   页面的 WebView 壳，服务端 `/desk.apk` 直接下发。
+- **页面只有三块：桌宠、今天的待办、对话框。别顺手加按钮**（关机/重启/截屏/音量/打开应用
+  都撤过一轮）。指令只剩 `say` / `pet` / `memotoggle` / `memorefresh`。
 - **页面改了不用重新打包**（内容由服务端下发），只有改壳子、换地址、换口令才需要
   `python tools/build-apk.py`，产物是 `dist/desk.apk`。构建细节见 `android/README.md`。
 - 两把钥匙别混：`remote.token` 是**电脑端**向服务器注册用的（服务端 `DESK_AGENT_TOKEN`），

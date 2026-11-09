@@ -26,6 +26,9 @@ const TOKEN = process.env.DESK_TOKEN || '';
 const AGENT_TOKEN = process.env.DESK_AGENT_TOKEN || '';
 const SHEET = process.env.DESK_SHEET || '/opt/secretary/pets/duodong/spritesheet.webp';
 const PUBLIC = path.join(__dirname, 'public');
+// 每日清单目录（daily_report.py 的产出）。手机要看的是"今天有哪些事"，
+// 而清单每小时由服务器 cron 重写，所以让电脑端来这里取原文，比自己算省事。
+const DAILY_DIR = process.env.DESK_DAILY_DIR || '/opt/secretary/.data/daily';
 
 const ONLINE_WINDOW_MS = 20000; // 20 秒没心跳算离线（心跳 8 秒一次）
 const POLL_HOLD_MS = 25000; // 长轮询挂起上限，要小于 nginx proxy_read_timeout
@@ -58,7 +61,9 @@ const state = {
     seenSeq: 0,
     info: null,
     host: '',
-    apps: [] // 电脑端上报的 appAliases 键名，手机端据此生成「打开应用」按钮
+    apps: [], // 电脑端上报的 appAliases 键名，手机端据此生成「打开应用」按钮
+    memo: null, // 电脑端上报的备忘录：{ stats:{total,done,open}, items:[{id,text,done,chat,src,day,hm}] }
+    memoAt: 0
   },
   shots: new Map(), // shotId -> { buf, at }  截图只留内存，页面关了就没人看
   startedAt: Date.now()
@@ -119,6 +124,11 @@ function tokenOf(req, url) {
 
 function online() {
   return Date.now() - state.agent.lastSeen < ONLINE_WINDOW_MS;
+}
+
+/** 北京时间的今天。清单目录是按北京时区分天的，用 UTC 会差 8 小时 */
+function bjDay() {
+  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
 /** 有新的指令就唤醒挂起的长轮询 */
@@ -217,11 +227,27 @@ async function handle(req, res) {
       host: state.agent.host,
       info: state.agent.info,
       apps: state.agent.apps,
+      memo: state.agent.memo,
+      memoAt: state.agent.memoAt,
       seq: state.seq,
       pending: state.queue.length,
       power: ALLOW_POWER,
       results: Object.values(state.results).sort((a, b) => a.at - b.at)
     });
+  }
+
+  // 每日清单原文。电脑端每隔一分钟来取一次，本地用 memo.parseDaily 解析成待办——
+  // 解析逻辑只有一处，服务和桌宠不会各写一份慢慢分叉。
+  if (p === '/api/daily') {
+    if (!sameToken(tokenOf(req, url), AGENT_TOKEN)) return json(res, 401, { error: 'token' });
+    const want = String(url.searchParams.get('day') || bjDay());
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(want)) return json(res, 400, { error: 'bad day' });
+    const file = path.join(DAILY_DIR, want, 'daily.md');
+    fs.readFile(file, 'utf8', (err, md) => {
+      if (err) return json(res, 200, { day: want, md: '', error: 'no-report' });
+      json(res, 200, { day: want, md, at: Date.now() });
+    });
+    return;
   }
 
   if (p === '/api/cmd' && req.method === 'POST') {
@@ -340,6 +366,10 @@ async function handle(req, res) {
     state.agent.info = body.info || null;
     state.agent.host = (body.info && body.info.host) || state.agent.host;
     if (Array.isArray(body.apps)) state.agent.apps = body.apps.slice(0, 8).map(String);
+    if (body.memo && typeof body.memo === 'object') {
+      state.agent.memo = body.memo;
+      state.agent.memoAt = Date.now();
+    }
     return json(res, 200, { ok: true, seq: state.seq });
   }
 

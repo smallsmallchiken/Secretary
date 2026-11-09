@@ -74,6 +74,18 @@ const AGENT = 'agent-token';
 
 async function main() {
   const port = 18900 + Math.floor(Math.random() * 90);
+
+  // 每日清单：造一份假的给服务端读，同时验证「今天」是按北京时区算的
+  const fs = require('fs');
+  const os = require('os');
+  const dailyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'desk-daily-'));
+  const bjDay = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  fs.mkdirSync(path.join(dailyRoot, bjDay), { recursive: true });
+  fs.writeFileSync(
+    path.join(dailyRoot, bjDay, 'daily.md'),
+    '## 一、今天要处理的事\n\n- [ ] 假待办一条｜QQ · 大肥鱼 · 09:12\n',
+    'utf8'
+  );
   const child = spawn(process.execPath, [path.join(ROOT, 'server', 'desk', 'server.js')], {
     env: {
       ...process.env,
@@ -82,6 +94,7 @@ async function main() {
       DESK_TOKEN: TOKEN,
       DESK_AGENT_TOKEN: AGENT,
       DESK_SHEET: path.join(ROOT, 'pets', 'duodong', 'spritesheet.webp'),
+      DESK_DAILY_DIR: dailyRoot,
       DESK_ALLOW_POWER: '' // 显式清空，别从环境里继承到 1
     },
     stdio: ['ignore', 'pipe', 'pipe']
@@ -202,8 +215,36 @@ async function main() {
       '报回执后才真正出队',
       !!(p3.json && !(p3.json.cmds || []).some((c) => c.id === cid))
     );
+    console.log('\n[6] 备忘录：上报能到手机，清单原文能取');
+    const memo = {
+      stats: { total: 2, done: 1, open: 1 },
+      items: [
+        { id: 'a1', text: '把图交上去', done: false, chat: '大肥鱼', src: 'QQ', day: bjDay, hm: '09:12' },
+        { id: 'a2', text: '已经做完的', done: true, chat: '', src: '', day: bjDay, hm: '08:00' }
+      ],
+      at: Date.now()
+    };
+    const rep = await request(port, `/agent/report?t=${AGENT}`, 'POST', { memo });
+    check('report 收下备忘录', rep.status === 200, `HTTP ${rep.status}`);
+    const mst = await request(port, `/api/state?t=${TOKEN}`, 'GET');
+    check('状态里带着待办条数', !!(mst.json && mst.json.memo && mst.json.memo.stats.total === 2),
+      JSON.stringify(mst.json && mst.json.memo));
+    check('未完成排在已完成前面', !!(mst.json && mst.json.memo.items[0].done === false));
+
+    const dl = await request(port, `/api/daily?t=${AGENT}&day=${bjDay}`, 'GET');
+    check('清单原文取得到', !!(dl.json && /假待办一条/.test(dl.json.md || '')), `HTTP ${dl.status}`);
+    const noDay = await request(port, `/api/daily?t=${AGENT}&day=${bjDay}`, 'GET');
+    check('日期格式对得上北京时间的今天', !!(noDay.json && noDay.json.day === bjDay));
+
+    const dl401 = await request(port, `/api/daily?t=${TOKEN}&day=${bjDay}`, 'GET');
+    check('清单用电脑端口令才能取（手机端口令不行）', dl401.status === 401, `HTTP ${dl401.status}`);
+    const badDay = await request(port, `/api/daily?t=${AGENT}&day=../etc`, 'GET');
+    check('日期参数不能穿目录', badDay.status === 400, `HTTP ${badDay.status}`);
+    const missDay = await request(port, `/api/daily?t=${AGENT}&day=1999-01-01`, 'GET');
+    check('那天没清单也不报错，回空', missDay.status === 200 && missDay.json.md === '');
   } finally {
     child.kill();
+    try { fs.rmSync(dailyRoot, { recursive: true, force: true }); } catch { /* 临时目录，清不掉无所谓 */ }
     await sleepMs(200);
   }
 

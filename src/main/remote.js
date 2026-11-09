@@ -6,8 +6,12 @@
  * 电脑主动连出去（长轮询），所以不需要公网 IP、不需要路由器端口映射，
  * 也不怕运营商封 80 端口——它就是个普通出站 HTTP 请求。
  *
- * 连上之后能做四件事：执行指令、上报状态、上传截图、转接对话。
- * 指令都走 tools/system.run，和桌宠自己用的是同一套实现，不重复造。
+ * 连上之后只做三件事：控制桌宠（戳一下 / 溜达一圈）、上报备忘录与状态、
+ * 把手机上的话转给桌宠的对话入口。
+ *
+ * 手机端刻意做得很窄——只留「桌宠」和「今天的待办」两块。电源、媒体、
+ * 打开应用、截屏那些都撤掉了：在外面真正会用的只有这两件事，多一个按钮
+ * 就多一处要维护、多一个可能点错的地方。要加功能先问清楚再加。
  */
 
 const http = require('http');
@@ -18,8 +22,10 @@ const path = require('path');
 const { URL } = require('url');
 const config = require('../core/config');
 const system = require('../core/tools/system');
-const media = require('../core/tools/media');
-const apps = require('../core/tools/apps');
+const memo = require('../core/memo');
+const { dataDir } = require('../core/paths');
+const wander = require('./wander');
+const windows = require('./windows');
 const { dbg } = require('../core/debug');
 
 let running = false;
@@ -86,13 +92,92 @@ function request(pathname, opts = {}) {
 
 /* ------------------------------ 指令执行 ------------------------------ */
 
-function shotPath() {
-  const dir = path.join(os.tmpdir(), 'desk-shot');
-  fs.mkdirSync(dir, { recursive: true });
-  return path.join(dir, `shot-${Date.now()}.jpg`);
+/* ------------------------------ 备忘录 ------------------------------ */
+
+/** 北京时间的今天。清单目录按北京时区分天，服务器与本地都按这个算 */
+function bjDay() {
+  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
-async function execOne(c) {
+/** 上一次同步到的清单原文：内容没变就不重复解析、不重复写盘 */
+let lastDailyMd = '';
+let lastMemoAt = 0;
+
+/**
+ * 从服务器取今天的清单原文，落到本地 .data/daily/<天>/daily.md，再交给 memo 解析。
+ *
+ * 为什么绕这一圈而不是自己解析：`memo.parseDaily` 是待办格式的唯一实现，
+ * 而清单的产出方是 server/daily_report.py。多写一份解析就多一处会分叉的地方。
+ */
+async function pullDaily(force) {
+  const day = bjDay();
+  let r;
+  try {
+    r = await request(
+      `/api/daily?t=${encodeURIComponent(cfg().token || '')}&day=${day}`,
+      { timeout: 12000 }
+    );
+  } catch (err) {
+    // 服务器重启、热点掉线都会走到这里。拉不到就拉倒，
+    // 本地已有的待办照常用——不能让一次网络抖动把整条上报链路打断。
+    dbg('[remote] 取清单失败:', err.message);
+    return { pulled: false, added: 0 };
+  }
+  if (r.status !== 200 || !r.json || !r.json.md) return { pulled: false, added: 0 };
+  const md = String(r.json.md);
+  if (!md.trim()) return { pulled: false, added: 0 };
+  if (!force && md === lastDailyMd) return { pulled: false, added: 0 };
+
+  lastDailyMd = md;
+  try {
+    const dir = path.join(dataDir(), 'daily', day);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'daily.md'), md, 'utf8');
+  } catch (err) {
+    dbg('[remote] 写本地清单失败:', err.message);
+    return { pulled: false, added: 0 };
+  }
+  try {
+    const s = memo.syncFromDaily();
+    if (s.added) dbg(`[remote] 清单同步：新增 ${s.added} 条，共 ${s.total} 条`);
+    return { pulled: true, added: s.added };
+  } catch (err) {
+    dbg('[remote] 备忘录同步失败:', err.message);
+    return { pulled: false, added: 0 };
+  }
+}
+
+/**
+ * 给手机看的备忘录。
+ *
+ * 未完成的排前面（新的在上），已完成的只带最近几条垫底——
+ * 手机上这块地方是拿来「看一眼还有什么事」，不是翻旧账的。
+ */
+function packMemo() {
+  let all = [];
+  let stats = { total: 0, done: 0, open: 0 };
+  try {
+    const l = memo.list();
+    all = l.items || [];
+    stats = l.stats || stats;
+  } catch {
+    /* 备忘录坏了不该拖垮整条上报链路 */
+  }
+  const open = all.filter((x) => !x.done);
+  const done = all.filter((x) => x.done).slice(0, 6);
+  const items = open.concat(done).slice(0, 40).map((x) => ({
+    id: x.id,
+    text: String(x.text || '').slice(0, 140),
+    done: !!x.done,
+    chat: String(x.chat || '').slice(0, 20),
+    src: String(x.src || '').slice(0, 8),
+    day: String(x.day || ''),
+    hm: String(x.hm || '')
+  }));
+  return { stats, items, at: Date.now() };
+}
+
+/* ------------------------------ 两条循环 ------------------------------ */async function execOne(c) {
   const id = Number(c.id) || 0;
   const cmd = String(c.cmd || '');
   const args = c.args || {};
@@ -103,56 +188,33 @@ async function execOne(c) {
   dbg(`[remote] 收到指令 #${id} ${cmd}`);
   try {
     switch (cmd) {
-      case 'shutdown':
-      case 'restart':
-      case 'lock':
-      case 'cancel': {
-        const r = await system.run(cmd, args);
-        ok = true;
-        message = r.message;
+      case 'pet': {
+        // 手机戳一下桌宠。不走去问模型：这个动作要的是「立刻有反应」，
+        // 等两秒才回一句才是真的怪。
+        const action = String(args.action || 'poke');
+        if (action === 'walk') {
+          ok = wander.nudge();
+          message = ok ? '溜达去了' : '正在忙，等会儿';
+        } else {
+          windows.sendToPet('pet:state', { state: 'happy' });
+          setTimeout(() => windows.sendToPet('pet:state', { state: 'idle' }), 1800);
+          ok = true;
+          message = '嗯？';
+        }
         break;
       }
-      case 'sleep': {
-        // 睡眠是立刻挂起，进程可能在结果发出去之前就冻住。
-        // 所以先把「正在睡眠」报上去，隔一会儿再真的睡。
-        // 闸门要先查：等 setTimeout 里才失败的话，手机已经收到「正在睡眠」了
-        if (!system.powerAllowed()) throw new Error('电源操作已禁用（power.allow 不是 true）');
+      case 'memotoggle': {
+        const r = memo.toggle(String(args.id || ''));
+        if (!r.ok) throw new Error(r.error || '没有这条待办');
         ok = true;
-        message = '正在睡眠';
-        setTimeout(() => {
-          system.run('sleep').catch((e) => dbg('[remote] 睡眠失败:', e.message));
-        }, 700);
+        message = r.item.done ? '已完成' : '已恢复';
+        data = { stats: r.stats };
         break;
       }
-      case 'shot': {
-        const file = shotPath();
-        const r = await system.run('screenshot', { format: 'jpg', path: file });
-        const buf = fs.readFileSync(r.data);
-        const up = await request(`/agent/shot?t=${encodeURIComponent(cfg().token || '')}`, {
-          method: 'POST',
-          body: { data: buf.toString('base64') },
-          timeout: 30000
-        });
-        if (!up.json || !up.json.shotId) throw new Error('上传截图失败');
+      case 'memorefresh': {
+        const n = await pullDaily();
         ok = true;
-        message = '截好了';
-        data = { shotId: up.json.shotId, kb: Math.round(buf.length / 1024) };
-        fs.unlink(r.data, () => {});
-        break;
-      }
-      case 'media': {
-        const r = await media.control(String(args.action || 'toggle'));
-        ok = true;
-        message = r.message;
-        break;
-      }
-      case 'openapp': {
-        const name = String(args.name || '').trim();
-        if (!name) throw new Error('要打开哪个应用？');
-        const aliases = config.get('appAliases', {}) || {};
-        const r = await apps.openApp(name, aliases);
-        ok = true;
-        message = r.message;
+        message = n.added ? `新增 ${n.added} 条` : '已是最新';
         break;
       }
       case 'say': {
@@ -218,28 +280,53 @@ async function pollLoop() {
   }
 }
 
+/**
+ * 状态 + 备忘录上报。
+ *
+ * 这块调快到了 3.5 秒一次：手机打开就是「今天还有什么事」，勾一条要马上变灰。
+ * 系统信息（CPU/内存/电量）没那么急，每 4 轮算一次，值班的是备忘录。
+ * 清单来源每 60 秒拉一次——服务器那边是每小时重跑日报，一分钟的延迟够用了。
+ */
 async function reportLoop() {
-  let last = 0;
+  let tick = 0;
+  let info = null;
   // 等一会儿再报第一次：CPU 占用要两次采样才有数，
   // 和 start() 里的预热挨太近会算不出东西
-  await sleep(1500);
+  await sleep(1200);
   while (running) {
     try {
-      const info = await system.sysinfo();
-      // 把 appAliases 的键带上去，手机端才能生成「打开应用」的按钮——
-      // 应用列表只有这台机器知道，服务端不该硬编码
-      const apps = Object.keys(config.get('appAliases', {}) || {});
+      if (Date.now() - lastMemoAt > 55000) {
+        lastMemoAt = Date.now();
+        try {
+          await pullDaily();
+        } catch (err) {
+          dbg('[remote] 拉清单失败:', err.message);
+        }
+      }
+      if (tick % 4 === 0 || !info) {
+        try {
+          info = await system.sysinfo();
+        } catch {
+          /* 拿不到就沿用上一次的，别因为电量读失败中断上报 */
+        }
+      }
+      tick += 1;
+
       const r = await request(`/agent/report?t=${encodeURIComponent(cfg().token || '')}`, {
         method: 'POST',
-        body: { info, apps },
+        body: { info, memo: packMemo() },
         timeout: 12000
       });
-      if (r.status === 200) last = Date.now();
+      if (r.status === 401) {
+        dbg('[remote] 上报口令不对，30 秒后再试');
+        await sleep(30000);
+        continue;
+      }
     } catch (err) {
       // 账号口令错已经由 pollLoop 报过，这里静默
       void err;
     }
-    await sleep(8000);
+    await sleep(3500);
   }
 }
 
@@ -281,4 +368,9 @@ function status() {
   return { running, enabled: c.enabled === true, base: c.base || '', name: c.name || '', seq };
 }
 
-module.exports = { start, stop, status, setSayHandler, execOne, _internals: { request, cfg } };
+module.exports = {
+  start, stop, status, setSayHandler, execOne,
+  // pullDaily / packMemo 单独放出来是给 tools/test-remote-memo.js 用的：
+  // 「清单 -> 待办」这条链路要能在不起 Electron 的情况下单测
+  _internals: { request, cfg, pullDaily, packMemo, resetDailyCache: () => { lastDailyMd = ''; } }
+};
