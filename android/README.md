@@ -37,8 +37,7 @@ python tools/build-apk.py --token 新口令 --base http://1.2.3.4
 
 `android/keystore.jks`，口令 `deskpet2026`，别名 `desk`，已 gitignore。
 
-**别删**。换签名的新 APK 覆盖装会报「应用未安装」，只能先卸载再装，
-那样 npm 里存的登录态之类都会丢。
+**别删**。换签名的新 APK 覆盖装会报「应用未安装」，只能先卸载再装。
 
 ## 结构
 
