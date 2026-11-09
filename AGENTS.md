@@ -83,6 +83,21 @@ env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron . \
 
 ## 绝对不要做
 
+- **不要拿真机验证关机 / 重启 / 睡眠**。哪怕是「排程 600 秒再 `shutdown /a` 取消」也不行：
+  任何一步失败（脚本崩、网断、忘了取消）就是把用户电脑关掉，而人在外面连电源键都按不到。
+  这件事已经发生过一次，用户明确禁止。
+
+  现在的做法是三道闸，任何一道开着都不会执行：
+
+  | 层 | 位置 | 默认 |
+  |---|---|---|
+  | 模型工具 | `src/core/tools/index.js` 里**根本没有** power 工具 | 无 |
+  | 桌面执行 | `system.run()` 的 `powerAllowed()`，要 config 的 `power.allow === true` | `false` |
+  | 手机服务端 | `server/desk/server.js` 的 `DESK_ALLOW_POWER`，没开就 403 且不进队列 | 未设 |
+
+  要验证只准用 `node tools/test-power.js` 和 `node tools/test-desk.js`：
+  前者把 `child_process.spawn` 换成假函数再测参数，后者起真服务端测 403。
+  **永远不要在 shell 里直接敲 `shutdown`**，包括 `/s /t 600` 这种「反正还有 10 分钟」的。
 - **不要提交任何含密钥的配置**。仓库是 **public**，泄露即失效。完整清单：
 
   | 文件 | 含什么 |

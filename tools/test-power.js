@@ -7,16 +7,16 @@
  * 假函数——即使闸门以后被谁改坏，这里最多记录到一次 spawn 调用，机器不会黑。
  * 这也是唯一允许「测关机」的形式：只验参数，不执行。
  *
- * 验四件事：
+ * 验三件事：
  *   1) 默认 power.allow=false 时，shutdown/restart/sleep 都在 spawn 之前抛错
- *   2) 抛错信息能看清是配置问题，不是别的原因
- *   3) 打开开关后确实会 spawn（且 argv 正确），但用的是假 spawn，仍然不执行
- *   4) 服务端（手机页面同源的那个）默认用 403 拒掉电源指令，非电源指令不受影响
+ *   2) 打开开关后确实会 spawn（argv 正确），但用的是假 spawn，仍然不执行
+ *   3) 模型那侧的工具表里根本没有电源工具（LLM 不可能自己关机）
+ *
+ * 服务端（手机页面那一侧）的边界在 tools/test-desk.js。
  */
 
 const path = require('path');
 const Module = require('module');
-const http = require('http');
 
 const ROOT = path.join(__dirname, '..');
 const STUB = path.join(__dirname, 'electron-stub.js');
@@ -29,7 +29,6 @@ Module._resolveFilename = function (request, ...rest) {
 
 // 必须在 require system.js 之前换掉：它在顶层就 `const { spawn } = require('child_process')`
 const cp = require('child_process');
-const realSpawn = cp.spawn;
 const calls = [];
 cp.spawn = function (file, args) {
   calls.push([path.basename(String(file)), args || []]);
@@ -55,6 +54,7 @@ cp.spawn = function (file, args) {
 
 const system = require(path.join(ROOT, 'src/core/tools/system.js'));
 const config = require(path.join(ROOT, 'src/core/config.js'));
+const tools = require(path.join(ROOT, 'src/core/tools/index.js'));
 
 let pass = 0;
 let fail = 0;
@@ -81,7 +81,7 @@ async function rejectOf(fn) {
 /* ------------------------------ 1. 默认关闭 ------------------------------ */
 
 async function testClosed() {
-  console.log('\n[1] 默认配置：电源操作一律拒绝');
+  console.log('[1] 默认配置：电源操作一律拒绝');
   const allow = (config.get('power', {}) || {}).allow;
   check('config 里 power.allow 不是 true', allow !== true, `实际 ${JSON.stringify(allow)}`);
   check('system.powerAllowed() 返回 false', system.powerAllowed() === false);
@@ -91,17 +91,18 @@ async function testClosed() {
     const err = await rejectOf(() => system.run(cmd));
     check(`${cmd} 抛错`, !!err, '居然没抛错，闸门失效了');
     check(`${cmd} 报「禁用」而不是别的`, !!(err && /禁用/.test(err.message)), err && err.message);
-    check(`${cmd} 没有触到 spawn`, calls.length === before, `多调用 ${calls.length - before} 次`);
+    check(`${cmd} 没触到 spawn`, calls.length === before, `多调用 ${calls.length - before} 次`);
   }
 
-  // lock 不拦（锁屏不丢数据，还能自己解锁），但不在这里测——真锁屏会打断用户
-  check('cancel 仍然允许（安全方向不设闸）', !/禁用/.test(String((await rejectOf(() => system.run('cancel'))) || '')));
+  // cancel 是安全方向（取消关机），不设闸；它走的是假 spawn，不会真执行
+  const cErr = await rejectOf(() => system.run('cancel'));
+  check('cancel 不被闸门拦', !cErr, cErr && cErr.message);
 }
 
 /* ------------------------------ 2. 打开开关 ------------------------------ */
 
 async function testOpen() {
-  console.log('\n[2] power.allow=true 时才真的放行（用假 spawn 验参数）');
+  console.log('\n[2] power.allow=true 时才放行（假 spawn 只验参数）');
   const realGet = config.get;
   config.get = function (key, dflt) {
     if (key === 'power') return { allow: true };
@@ -129,127 +130,22 @@ async function testOpen() {
     config.get = realGet;
   }
 
-  calls.length = 0;
-  check('开关关掉后立刻恢复拒绝', system.powerAllowed() === false);
+  check('开关一关立刻恢复拒绝', system.powerAllowed() === false);
 }
 
-/* ------------------------------ 3. 服务端 ------------------------------ */
+/* ------------------------------ 3. 模型那侧 ------------------------------ */
 
-function getJson(port, pathname) {
-  return new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port, path: pathname, method: 'GET' }, (res) => {
-      const bufs = [];
-      res.on('data', (b) => bufs.push(b));
-      res.on('end', () => {
-        let json = null;
-        try {
-          json = JSON.parse(Buffer.concat(bufs).toString('utf8'));
-        } catch {
-          /* 静态资源不是 JSON */
-        }
-        resolve({ status: res.statusCode, json });
-      });
-    });
-    req.on('error', reject);
-    req.setTimeout(2000, () => req.destroy(new Error('timeout')));
-    req.end();
-  });
-}
-
-function postJson(port, pathname, body) {
-  return new Promise((resolve, reject) => {
-    const data = Buffer.from(JSON.stringify(body));
-    const req = http.request(
-      {
-        host: '127.0.0.1',
-        port,
-        path: pathname,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': data.length }
-      },
-      (res) => {
-        const bufs = [];
-        res.on('data', (b) => bufs.push(b));
-        res.on('end', () => {
-          let json = null;
-          try {
-            json = JSON.parse(Buffer.concat(bufs).toString('utf8'));
-          } catch {
-            /* 忽略 */
-          }
-          resolve({ status: res.statusCode, json });
-        });
-      }
-    );
-    req.on('error', reject);
-    req.setTimeout(3000, () => req.destroy(new Error('timeout')));
-    req.end(data);
-  });
-}
-
-const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function testServer() {
-  console.log('\n[3] 服务端：没开 DESK_ALLOW_POWER 时电源指令 403');
-  const port = 18700 + Math.floor(Math.random() * 200);
-  const child = realSpawn(process.execPath, [path.join(ROOT, 'server', 'desk', 'server.js')], {
-    env: {
-      ...process.env,
-      DESK_PORT: String(port),
-      DESK_HOST: '127.0.0.1',
-      DESK_TOKEN: 'test-token',
-      DESK_AGENT_TOKEN: 'test-agent',
-      DESK_SHEET: path.join(ROOT, 'pets', 'duodong', 'spritesheet.webp'),
-      DESK_ALLOW_POWER: '' // 显式清空，避免从环境里继承到 1
-    },
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-  let errbuf = '';
-  child.stderr.on('data', (b) => (errbuf += b.toString()));
-
-  try {
-    let up = false;
-    for (let i = 0; i < 40; i++) {
-      try {
-        const r = await getJson(port, '/healthz');
-        if (r.status === 200) {
-          up = true;
-          break;
-        }
-      } catch {
-        /* 还没起来 */
-      }
-      await sleepMs(100);
-    }
-    if (!up) {
-      check('服务端起来了', false, errbuf.slice(0, 300) || '超时');
-      return;
-    }
-
-    for (const cmd of ['shutdown', 'restart', 'sleep']) {
-      const r = await postJson(port, '/api/cmd?t=test-token', { cmd });
-      check(`${cmd} 被 403 拒绝`, r.status === 403, `HTTP ${r.status} ${JSON.stringify(r.json)}`);
-      check(
-        `${cmd} 错误码是 power-disabled`,
-        !!(r.json && r.json.error === 'power-disabled'),
-        JSON.stringify(r.json)
-      );
-    }
-
-    const info = await getJson(port, '/api/state?t=test-token');
-    check('state 里 power=false 让前端置灰按钮', !!(info.json && info.json.power === false), JSON.stringify(info.json && info.json.power));
-    check('被拒的指令没有进队列', !!(info.json && info.json.pending === 0), JSON.stringify(info.json && info.json.pending));
-
-    // 非电源指令不能被误伤
-    const shot = await postJson(port, '/api/cmd?t=test-token', { cmd: 'shot' });
-    check('shot 仍然放行', shot.status === 200 && shot.json && shot.json.ok === true, `HTTP ${shot.status}`);
-
-    const bad = await postJson(port, '/api/cmd?t=wrong', { cmd: 'shutdown' });
-    check('token 不对时 401（先拦 token 再谈别的）', bad.status === 401, `HTTP ${bad.status}`);
-  } finally {
-    child.kill();
-    await sleepMs(200);
+function testTools() {
+  console.log('\n[3] 模型工具表里没有电源工具');
+  const names = tools.TOOLS.map((t) => t.name);
+  for (const bad of ['shutdown', 'restart', 'sleep', 'power_off']) {
+    check(`没有 ${bad} 工具`, !names.includes(bad), names.join(','));
   }
+  check('有 lock_screen（锁屏不丢数据）', names.includes('lock_screen'));
+
+  // 描述里提到「关机」会诱导模型去尝试走别的路径，检查一遍文案
+  const descs = tools.TOOLS.map((t) => `${t.name} ${t.label || ''} ${t.description || ''}`);
+  check('没有工具的文案在撩「关机/重启」', !descs.some((d) => /关机|重启/.test(d)));
 }
 
 /* ------------------------------ run ------------------------------ */
@@ -257,7 +153,7 @@ async function testServer() {
 (async () => {
   await testClosed();
   await testOpen();
-  await testServer();
+  await testTools();
   console.log(`\n电源闸门：${pass} 通过，${fail} 失败`);
   if (calls.length) console.log('（假 spawn 记录：' + JSON.stringify(calls) + '）');
   process.exit(fail ? 1 : 0);

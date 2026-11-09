@@ -258,6 +258,15 @@ async function handle(req, res) {
     state.agent.lastSeen = Date.now();
     state.agent.seenSeq = Math.max(state.agent.seenSeq, since);
     state.agent.host = url.searchParams.get('host') || state.agent.host;
+
+    // 服务端重启过：state.seq 从 0 重新数，而电脑端的 since 还记得上次的值（比如 4）。
+    // 不把它抬上来，接下来分配的 id 全都 <= since，电脑一条都取不到——看起来就是
+    // 「手机点了按钮没反应」，得连点好几次把 seq 追平才恢复。
+    // 这种情况立刻回一个空响应（不挂 25 秒），客户端会带着新 seq 马上再来一轮。
+    if (since > state.seq) {
+      state.seq = since;
+      return json(res, 200, { cmds: [], now: Date.now(), resync: true });
+    }
     dropStale();
 
     const pick = () => state.queue.filter((c) => c.id > since);
