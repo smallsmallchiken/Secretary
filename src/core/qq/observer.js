@@ -193,9 +193,11 @@ async function saveOne(raw, type, base, tsSec) {
  */
 function capture(event, opts = {}) {
   const isGroup = event && event.message_type === 'group';
+  // 只收私聊：群消息不归档、不下载媒体。bot.js 的 onMessage 已经拦过一次，
+  // 这里是给「别处直接调 capture」留的兜底，两道闸门都不放开群。
+  if (isGroup) return null;
   const rec = fullRecord(event, Object.assign({}, opts, {
-    // 群消息事件不带群名，用启动时缓存的群列表兜底
-    chatName: opts.chatName || (isGroup && groupNames[String(event.group_id)]) || ''
+    chatName: opts.chatName || ''
   }));
   if (!rec) return null;
   try {

@@ -979,6 +979,11 @@ async function detectPersonaChange(text, currentPersona) {
 async function onMessage(event) {
   const cfg = getCfg();
 
+  // 只收私聊：群消息一律丢弃（用户要求「忽略所有群聊的信息」）。
+  // 放在最前面——下面 observeOnly 和回复模式是两条独立分支、各有自己的
+  // 归档入口，在这里拦一次才能保证两条路都不会漏群消息进归档/素材库。
+  if (event && event.message_type === 'group') return;
+
   // 只收不发模式：全量接收 + 连同媒体原文件一起落盘，然后**立刻返回**。
   // 不看白名单、不进护栏、不调模型、不排队攒消息——「处理所有信息」意味着
   // 任何会话（含群、陌生人、临时会话）都要记，过滤是回复模式才有的概念。

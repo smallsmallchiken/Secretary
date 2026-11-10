@@ -291,17 +291,22 @@ async function main() {
       await new Promise((r) => setTimeout(r, 1200)); // 等 batchWaitMs(10ms) + 生成
       check('连发两条只回一次（攒批）', replyCount === 2, `实际 ${replyCount}`);
 
-      // 用例 I：白名单群 → send_group_msg 回复
+      // 用例 I：白名单里的群也不回 —— 机器人已经改成「只收私聊」，
+      // 群消息在 onMessage 最前面就被丢掉，连白名单都走不到。
       config.set({ qq: { whitelist: [{ qq: 10001, name: '老王' }, { group: 888, name: '测试群' }] } });
+      const iBefore = groupCount;
       await pushEvent(petWs, {
         post_type: 'message', message_type: 'group', sub_type: 'normal',
         user_id: 10001, group_id: 888, message_id: 300,
         sender: { card: '小明', nickname: '小明' },
         message: [{ type: 'text', data: { text: '大家晚上吃什么' } }]
       });
-      check('白名单群自动回复', groupCount === 1, `实际 ${groupCount}`);
-      const gSent = received.find((r) => r.action === 'send_group_msg');
-      check('群回复发给正确的群', gSent && String(gSent.params.group_id) === '888');
+      check('白名单群也不回复', groupCount === iBefore, `实际 ${groupCount}`);
+      check(
+        '没有任何群发送记录',
+        !received.some((r) => r.action === 'send_group_msg'),
+        JSON.stringify(received.filter((r) => r.action === 'send_group_msg').slice(0, 1))
+      );
 
       // 用例 J：模型回配图标记 → 文字+图片段发出（共享媒体库）
       // 造一张假表情包进共享池（.data/media/pics/，微信那边读的是同一个目录）
@@ -486,53 +491,55 @@ async function main() {
       _internals.setTtsImpl(null);
       llmStub.behavior = origBehavior;
 
-      /* ---------------- 群聊记忆 / 不插嘴 / 昵称标签 / 调教演进 ---------------- */
+      /* ---------------- 群聊：一律忽略（只收私聊） ---------------- */
 
-      // 用例 K：群聊消息都进记忆（含机器人没回的），带说话人标签
-      const gState = _internals.chatState('888');
-      check('群消息写进记忆', Array.isArray(gState.memory) && gState.memory.length >= 1, JSON.stringify(gState.memory));
-      check(
-        '记忆带说话人标签',
-        gState.memory.some((m) => m.who === '小明'),
-        JSON.stringify(gState.memory.slice(-3))
-      );
-      check(
-        '自己说过的话也进记忆',
-        gState.memory.some((m) => m.who === '我'),
-        JSON.stringify(gState.memory.slice(-3))
-      );
-
-      // 用例 L：别人互聊，模型输出 [SKIP] → 不插嘴，但记忆照样记
-      llmStub.behavior = () => '[SKIP]';
-      const beforeSkip = groupCount;
-      const memLenBefore = _internals.chatState('888').memory.length;
+      // 用例 K：群消息完全丢弃 —— 不发送、不进记忆、不写归档。
+      // 产品语义变更：机器人只采集私聊，群聊连归档都不留（含媒体）。
+      const kBefore = groupCount;
+      const gStateBefore = JSON.stringify(_internals.chatState('888') || {});
       await pushEvent(petWs, {
         post_type: 'message', message_type: 'group', sub_type: 'normal',
         user_id: 10002, group_id: 888, message_id: 500,
-        sender: { card: '小红', nickname: '小红' },
-        message: [{ type: 'text', data: { text: '你昨天几点睡的' } }]
+        sender: { card: '小明', nickname: '小明' },
+        message: [{ type: 'text', data: { text: '群里有人吗' } }]
       });
-      check('互聊时不插嘴', groupCount === beforeSkip, `实际 ${groupCount}`);
+      check('群消息不发送', groupCount === kBefore, `实际 ${groupCount}`);
+      const gState = _internals.chatState('888') || {};
       check(
-        '没回的消息也进记忆',
-        _internals.chatState('888').memory.length === memLenBefore + 1,
-        `实际 ${_internals.chatState('888').memory.length}`
+        '群消息不进上下文记忆',
+        JSON.stringify(gState) === gStateBefore,
+        JSON.stringify(gState.memory || [])
       );
+      // 归档：DATA_DIR/archive/<日>.jsonl 里不该出现这个群号
+      const archDir = path.join(DATA_DIR, 'archive');
+      let archText = '';
+      try {
+        archText = fs.readdirSync(archDir)
+          .filter((f) => f.endsWith('.jsonl'))
+          .map((f) => fs.readFileSync(path.join(archDir, f), 'utf8'))
+          .join('');
+      } catch {
+        /* 目录不存在也算没写 */
+      }
+      check('群消息不写归档', !archText.includes('"888"'), archText.slice(0, 160));
 
-      // 用例 M：群聊上下文用「[昵称] 内容」区分说话人，且明确告知标签只用于区分
-      llmStub.behavior = () => '睡了睡了';
-      llmStub.calls.length = 0;
+      // 用例 L：群里有图/表情也不下载（媒体链路同样不碰）
+      const inboxRoot = path.join(DATA_DIR, 'inbox');
+      const listMedia = () => {
+        try {
+          return fs.readdirSync(inboxRoot, { recursive: true }).length;
+        } catch {
+          return 0;
+        }
+      };
+      const mediaBefore = listMedia();
       await pushEvent(petWs, {
         post_type: 'message', message_type: 'group', sub_type: 'normal',
-        user_id: 10003, group_id: 888, message_id: 501,
-        sender: { card: '阿强', nickname: '阿强' },
-        message: [{ type: 'text', data: { text: '那你们几点睡的' } }]
+        user_id: 10002, group_id: 888, message_id: 502,
+        sender: { card: '小明', nickname: '小明' },
+        message: [{ type: 'image', data: { file: 'http://127.0.0.1:1/none.png', url: 'http://127.0.0.1:1/none.png' } }]
       });
-      const genCall = llmStub.calls.find((c) => c.allowTools === false && c.temperature === 1.0);
-      const genUser = genCall && (typeof genCall.messages[1].content === 'string' ? genCall.messages[1].content : '');
-      const genSys = genCall && genCall.messages[0].content;
-      check('上下文里有说话人标签', !!genUser && genUser.includes('[小红]') && genUser.includes('[阿强]'), genUser);
-      check('提示词声明标签只用于区分', !!genSys && genSys.includes('只是说话人标签'), genSys && genSys.slice(0, 80));
+      check('群媒体不落盘', listMedia() === mediaBefore, `实际 ${listMedia()}`);
 
       // 用例 N：调教是演进式的（把当前人设交给模型合并）
       llmStub.behavior = (opts) => {

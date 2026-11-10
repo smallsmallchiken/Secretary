@@ -60,6 +60,12 @@ LIB_FILE = os.path.join(LIB, 'library.jsonl')
 DESC_FILE = os.path.join(LIB, 'desc.json')
 MD_FILE = os.path.join(LIB, '素材库.md')
 
+# 群名特征（只收私聊，群素材一律不进库）。人数后缀是微信群的固定写法，
+# 其余是名字里直接写着群；「Group/Chatroom」给 QQ 那些英文群名兜底。
+_GROUP_HINT = re.compile(
+    r'[（(]\s*\d{1,4}\s*[)）]|群聊|聊天群|交流群|家教群|兼职群|工作群|Group\b|Chatroom',
+    re.I)
+
 # 每次运行最多理解多少个：视觉/语音都是按次计费，定时跑要有个闸
 MAX_UNDERSTAND = 80
 # 理解失败的素材多久之后才重试（秒）。cron 是每分钟一次，不退避会变成
@@ -154,6 +160,11 @@ def collect_qq():
             f = r.get('file') or ''
             if not f:
                 continue
+            # 只收私聊：QQ 的媒体索引不记 message_type，只能看会话名。
+            # 采集侧（observer.capture）已经不再收群消息，这里挡历史存量：
+            # 群里才有 `(237)` 这种人数后缀，或者名字里直接写着「群/Group」。
+            if _GROUP_HINT.search(str(r.get('n') or '')):
+                continue
             # 索引里的 file 是相对 .data 的（inbox/<日>/qq/x.jpg）
             path = f if os.path.isabs(f) else os.path.join(ROOT, f)
             if not os.path.exists(path):
@@ -187,6 +198,11 @@ def collect_wx():
             kind = r.get('k') or ''
             shot = r.get('shot') or ''
             if not shot or kind not in WX_KEEP:
+                continue
+            # 只收私聊：`sn` 是群成员昵称，只有群消息才有（私聊永远为空）。
+            # 采集侧已经不再归档群消息，这里挡的是历史存量——不然素材库里
+            # 会混进一堆家教群、兼职群的截图。
+            if str(r.get('sn') or '').strip():
                 continue
             path = os.path.join(WX_INBOX, shot)
             if not os.path.exists(path):

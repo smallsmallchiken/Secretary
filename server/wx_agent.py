@@ -17,6 +17,8 @@
 配置：/tmp/wx_agent_cfg.json   状态：/tmp/wx_agent_state.json   日志：stdout
 """
 import json, os, re, subprocess, time, hashlib, sys, random, difflib, calendar, threading
+import array
+import wave
 import ctypes
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
@@ -288,7 +290,7 @@ def _near_dup(title, text, ts, window=12 * 3600):
     return False
 
 
-def arc_update_text(day, mid, text):
+def arc_update_text(day, mid, text, fix='vl'):
     """把某条归档的正文换掉（视觉复核用）。按 `mid`（气泡指纹）定位。
 
     监听是往文件尾部追加的；这里要改中间一行，只能整份重写。文件一天几百行，
@@ -317,7 +319,7 @@ def arc_update_text(day, mid, text):
                 continue
             if not hit and str(r.get('mid') or '') == str(mid):
                 r['x'] = text[:1000]
-                r['fix'] = 'vl'
+                r['fix'] = fix
                 hit = True
             out.append(json.dumps(r, ensure_ascii=False) + '\n')
         if not hit:
@@ -2557,6 +2559,164 @@ def _vl_enqueue(cfg, day, mid, crop, old):
     return True
 
 
+# ---------- 语音条 → 文字 ----------
+# 语音气泡里**没有字**（只有一个声波图标和时长），所以「截图 + 视觉模型」对
+# 语音天然无效——归档里长期只有 `[语音条]` 三个字就是这么来的。
+# 真正的音频在客户端手里：它用内嵌 VLC 播放，而容器没有声卡，PulseAudio 只有
+# 一个 null-sink `vsink`，播放的声音全都流进它。从 `vsink.monitor` 录回来就是
+# 原样的语音，交给 ASR 就是字。点一下播放完全在本地，不发任何消息。
+ASR_MODEL = 'Qwen/Qwen3-ASR-1.7B'
+VOICE_DAILY = 200          # 每天最多转写多少条（和 VL 复核分开计数）
+VOICE_RMS = 260            # 「有声音」阈值：实测静音 ~40，人声 800+
+_VOICE_COUNT = {'day': '', 'n': 0}
+
+
+def _voice_cfg(cfg):
+    ob = (cfg or {}).get('observe') or {}
+    return bool(ob.get('voiceAsr', True)), int(ob.get('asrBudget', VOICE_DAILY) or 0)
+
+
+def _raw_rms(path):
+    """读 raw PCM 末尾 0.2 秒算均方根，判断此刻有没有声音。"""
+    try:
+        n = os.path.getsize(path)
+    except OSError:
+        return 0.0
+    if n < 640:
+        return 0.0
+    try:
+        with open(path, 'rb') as f:
+            f.seek(max(0, n - 6400))
+            d = f.read()
+    except OSError:
+        return 0.0
+    a = array.array('h')
+    a.frombytes(d[:len(d) // 2 * 2])
+    if not a:
+        return 0.0
+    return (sum(float(v) * v for v in a) / len(a)) ** 0.5
+
+
+def _voice_wav(im, win, band, max_sec=25.0):
+    """点一下语音气泡，把播放出来的声音录成 wav。返回 (路径, 有声秒数)。
+
+    微信语音条点一下就开始播、播完自动停。这里**同步**录完整段：主循环此刻
+    本来就在处理这个会话，不会去点别处；异步的话主循环一切会话，播放就被
+    打断了。代价是最多阻塞 25 秒——语音条一天没几条，换来的是不会串音。
+    """
+    lo, hi = _band_x_extent(im.load(), win, band)
+    if lo is None or hi is None or hi - lo < 16:
+        return '', 0.0
+    cx = (lo + hi) // 2
+    cy = (band['y0'] + band['y1']) // 2
+    raw = os.path.join('/tmp', '_wx_voice_%d.raw' % os.getpid())
+    wav = raw[:-4] + '.wav'
+    fh = open(raw, 'wb')
+    rec = subprocess.Popen(
+        ['parec', '-d', 'vsink.monitor', '--format=s16le',
+         '--rate=16000', '--channels=1', '--raw'],
+        stdout=fh, stderr=subprocess.DEVNULL)
+    heard = 0.0
+    try:
+        time.sleep(0.35)                 # 等 parec 真连上源，别漏掉开头
+        click(cx, cy, settle=0.05)
+        t0 = time.time()
+        last_loud = 0.0
+        while time.time() - t0 < max_sec:
+            time.sleep(0.2)
+            if _raw_rms(raw) > VOICE_RMS:
+                heard += 0.2
+                last_loud = time.time()
+            elif last_loud and time.time() - last_loud >= 1.2:
+                break                    # 连续 1.2 秒静音 = 播完了
+            elif not last_loud and time.time() - t0 > 2.5:
+                break                    # 点了 2.5 秒还没响，别干等
+    finally:
+        try:
+            rec.terminate()
+            rec.wait(timeout=3)
+        except Exception:
+            try:
+                rec.kill()
+            except Exception:
+                pass
+        fh.close()
+    try:
+        if heard >= 0.3:
+            with open(raw, 'rb') as f:
+                pcm = f.read()
+            w = wave.open(wav, 'wb')
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(pcm)
+            w.close()
+            return wav, heard
+        return '', 0.0
+    except Exception as e:
+        log('语音录音收尾失败：%s' % e)
+        return '', 0.0
+    finally:
+        try:
+            os.remove(raw)
+        except OSError:
+            pass
+
+
+def _asr_wav(cfg, wav):
+    """wav → 文字。用 Qwen3-ASR-1.7B：实测 0.54s，比 SenseVoiceSmall（4.9s）快一个
+    数量级，而且「十点」不会写成「10点」（SenseVoice 会）。"""
+    llm = (cfg or {}).get('llm') or {}
+    key = llm.get('apiKey') or ''
+    if not key or not wav or not os.path.exists(wav):
+        return ''
+    model = ((cfg or {}).get('observe') or {}).get('asrModel') or ASR_MODEL
+    try:
+        import requests
+        with open(wav, 'rb') as f:
+            data = f.read()
+        t0 = time.time()
+        r = requests.post(
+            llm['baseUrl'].rstrip('/') + '/audio/transcriptions',
+            headers={'Authorization': 'Bearer ' + key},
+            data={'model': model},
+            files={'file': ('a.wav', data, 'audio/wav')},
+            timeout=120)
+        if r.status_code != 200:
+            log('ASR HTTP %s %s' % (r.status_code, r.text[:100]))
+            return ''
+        txt = (r.json().get('text') or '').strip()
+        log('ASR %.1fs %r' % (time.time() - t0, txt[:40]))
+        return txt[:500]
+    except Exception as e:
+        log('ASR 失败：%s' % e)
+        return ''
+
+
+def voice_to_text(cfg, im, win, band):
+    """一条语音气泡 → 文字。失败返回 ''，调用方保留 `[语音条]`。"""
+    on, budget = _voice_cfg(cfg)
+    if not on:
+        return ''
+    today = _day_of(time.time())
+    if _VOICE_COUNT['day'] != today:
+        _VOICE_COUNT['day'], _VOICE_COUNT['n'] = today, 0
+    if _VOICE_COUNT['n'] >= budget:
+        return ''
+    _VOICE_COUNT['n'] += 1
+    wav, secs = _voice_wav(im, win, band)
+    if not wav:
+        log('语音没录到声音（多半是点空了）')
+        return ''
+    try:
+        return _asr_wav(cfg, wav)
+    finally:
+        try:
+            os.remove(wav)               # 只存文字，wav 用完就删
+        except OSError:
+            pass
+
+
 def _converge_nick(st, title, nick):
     """群昵称收敛：OCR 每次读出来都差一两个字母，同一人被记成好几个人。
 
@@ -2631,7 +2791,13 @@ def observe_chat(im, win, bands, title, st):
     """监听模式处理一个会话：把屏幕上所有对方气泡逐条归档 + 留截图。
 
     不调模型、不发送、不看白名单、不进冷却。返回新增条数。
+
+    **群聊一律不采**（用户：只收集个人信息）。这里是最后一道闸门：主循环
+    已经先判过一遍并 continue，但 `probe`/`once` 这类调试入口会直接调本函数，
+    没有它就会漏进去一批群消息。
     """
+    if is_group_chat(title):
+        return 0
     ins = [b for b in bands if b.get('kind') == 'in'][-OBS_MAX_BANDS:]
     if not ins:
         return 0
@@ -2705,6 +2871,14 @@ def observe_chat(im, win, bands, title, st):
                 long_msg = len(re.sub(r'\s+', '', text)) >= 36
                 if q < 0.78 or long_msg:
                     _vl_enqueue(_CFG_BOX[0], _day_of(ts), fp, crop, text)
+            elif kind == 'voice':
+                # 语音条：先归档（保证这一条不会丢），再把气泡点开、录下播放的
+                # 声音转成文字，成功就回填正文。同步做——主循环此刻本来就在
+                # 这个会话里，不会去点别处把播放打断；气泡播完会自动恢复原样，
+                # 下一轮扫描的图指纹和刚记的一致，也就不会重复归档。
+                vt = voice_to_text(_CFG_BOX[0] or {}, im, win, b)
+                if vt and arc_update_text(_day_of(ts), fp, vt, fix='asr'):
+                    log('语音转文字 %s: %r' % (fp, vt[:30]))
     if group and sender:
         sb[title] = [sender, now]
     if cur_ts:
@@ -2834,6 +3008,12 @@ def main_loop():
                 # **所有**对方消息，最后一条是我方消息不代表前面没有新消息。
                 if cfg.get('observeOnly'):
                     title = get_chat_title(shot2, win)
+                    # 只收私聊：群聊连 OCR 都不做（一个群一屏几十条气泡，逐条
+                    # 裁剪 + 识别白烧 CPU，而且采了也不用）。红点在这一步已经
+                    # 被 open_chat 点掉了，之后也不会再弹出来，正好当「已忽略」。
+                    if title and is_group_chat(title):
+                        log('observe: 群聊 "%s" 不采集' % title)
+                        continue
                     if title:
                         _CFG_BOX[0] = cfg       # 复核线程要用 apiKey/baseUrl
                         observe_chat(shot2, win, bands, title, st)
@@ -3018,6 +3198,31 @@ if __name__ == '__main__':
         log('tts -> %s' % wav)
         ok = send_voice(wav, win)
         log('send voice ok=%s' % ok)
+    elif len(sys.argv) > 1 and sys.argv[1] == 'asr':
+        # 单独转写一个 wav（联调用）：python3 wx_agent.py asr /tmp/a.wav
+        cfg = load_cfg()
+        log('asr -> %r' % (_asr_wav(cfg, sys.argv[2]),))
+    elif len(sys.argv) > 1 and sys.argv[1] == 'voiceprobe':
+        # 把**当前打开的会话**里能认出的语音气泡逐条点开转写（不入库）。
+        # 用来验证「点播放 → 录 monitor → ASR」这条链，不污染归档。
+        cfg = load_cfg()
+        win = win_geometry()
+        log('win=%s' % (win,))
+        shot = screenshot()
+        bands = scan_bubbles(shot, win)
+        log('bands=%s' % [(b['y0'], b['y1'], b['kind']) for b in bands])
+        n = 0
+        for b in bands:
+            if b['kind'] != 'in':
+                continue
+            kind, text = _band_read(_obs_crops(shot, win, b))
+            log('band y=%d..%d kind=%s text=%r' % (b['y0'], b['y1'], kind, text[:30]))
+            if kind != 'voice':
+                continue
+            vt = voice_to_text(cfg, shot, win, b)
+            log('  -> %r' % (vt,))
+            n += 1
+        log('voiceprobe done, tried %d' % n)
     elif len(sys.argv) > 1 and sys.argv[1] == 'send':
         # 直接发一条消息到当前会话（联调用）
         cfg = load_cfg()

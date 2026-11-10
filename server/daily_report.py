@@ -138,6 +138,11 @@ def load_messages(day):
         # /opt/linux-im/archive 是容器直接写的原件。取并集去重才不会漏掉
         # 刚生成清单前几秒进来的最后一条消息。
     out.sort(key=lambda m: m['t'])
+    # 只收私聊：群消息一律不进清单（采集侧已经不再入档，挡的是历史存量）。
+    before = len(out)
+    out = [m for m in out if not is_group_msg(m)]
+    if len(out) != before:
+        log('%s: 跳过 %d 条群聊消息（只收私聊）' % (day, before - len(out)))
     # 序号给模型引用媒体用
     for i, m in enumerate(out):
         m['no'] = 'n%d' % (i + 1)
@@ -161,6 +166,8 @@ def normalize(r, platform):
         't': int(r.get('t') or 0),
         'platform': plat,
         'who': ('我' if r.get('me') else (r.get('sn') or r.get('n') or '对方')),
+        # 原样留一份发送者昵称：微信群消息才有这个字段，`is_group_msg` 靠它认群
+        'sn': str(r.get('sn') or ''),
         'chat': r.get('n') or r.get('id') or '?',
         'chat_type': '群聊' if r.get('c') == 'group' else '',
         'text': clean_text(r.get('x') or ''),
@@ -206,6 +213,31 @@ def _cmp_key(t):
 def _chat_size(name):
     m = re.search(r'[（(](\d{1,4})[)）]', name or '')
     return m.group(1) if m else ''
+
+
+# 群名特征。**只收私聊**之后，历史归档里的群消息还要在生成清单时挡掉：
+# 之前攒下来的群消息不会自己消失，不挡的话清单里仍然是一堆群聊。
+# 判据要稳，别把私聊名字里带「群」的联系人（「家教群主」）也误杀：
+#   - 人数后缀 `(237)`：微信群的标题固定这么写，私聊几乎没有；
+#   - 明确的群词：群聊/聊天群/交流群/家教群/兼职群/工作群/Group/Chatroom。
+_GROUP_NAME_RE = re.compile(
+    r'[（(]\s*\d{1,4}\s*[)）]|群聊|聊天群|交流群|家教群|兼职群|工作群|Group\b|Chatroom',
+    re.I)
+
+
+def is_group_msg(m):
+    """一条归一化后的消息是不是群聊来的。
+
+    QQ 归档有 `c=group`；微信归档没有这个字段，靠三样东西认：
+      - `sn`（发送者昵称）：微信群消息才有，私聊永远是空；
+      - 会话名里的人数后缀或群词；
+      - `chat_type`（normalize 时从 c 带过来的）。
+    """
+    if m.get('chat_type'):
+        return True
+    if m.get('platform') == '微信' and str(m.get('sn') or '').strip():
+        return True
+    return bool(_GROUP_NAME_RE.search(str(m.get('chat') or '')))
 
 
 def merge_chat_names(msgs):
