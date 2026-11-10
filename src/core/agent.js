@@ -4,7 +4,9 @@ const config = require('./config');
 const llm = require('./llm');
 const tools = require('./tools');
 const persona = require('./persona');
+const context = require('./context');
 const { formatWhen } = require('./tools/reminder');
+const { dataDir } = require('./paths');
 const { dbg } = require('./debug');
 
 /* ------------------------------------------------------------------ */
@@ -255,11 +257,49 @@ function isComplex(text, local) {
 let history = [];
 const HISTORY_LIMIT = 20;
 
+/* ---------------- 对话历史持久化 ----------------
+ * 以前 history 只活在内存里，桌宠一重启就失忆——昨天聊到一半的事，
+ * 今天问「我们刚才说到哪了」它一脸懵。现在落盘到 .data/chat-history.json，
+ * 启动时读回来。只存文本，不存工具调用中间态（那是当时的执行细节，过期就没用）。
+ */
+const HISTORY_FILE = require('path').join(dataDir(), 'chat-history.json');
+
+function loadHistory() {
+  try {
+    const fs = require('fs');
+    const d = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+    if (Array.isArray(d)) return d.filter((x) => x && x.role && x.content).slice(-HISTORY_LIMIT);
+  } catch {
+    /* 没有历史文件就当新装 */
+  }
+  return [];
+}
+
+function saveHistory() {
+  try {
+    const fs = require('fs');
+    const tmp = `${HISTORY_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(history));
+    fs.renameSync(tmp, HISTORY_FILE);
+  } catch (err) {
+    dbg('[agent] 对话历史保存失败:', err.message);
+  }
+}
+
+function pushHistory(role, content) {
+  if (!content) return;
+  history.push({ role, content: String(content) });
+  if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
+  saveHistory();
+}
+
+history = loadHistory();
+
+/** 本地路径的对子（问一句答一句）也进历史，重启后接着聊 */
 function remember(userText, assistantText) {
   if (!assistantText) return;
-  history.push({ role: 'user', content: String(userText) });
-  history.push({ role: 'assistant', content: String(assistantText) });
-  if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
+  pushHistory('user', userText);
+  pushHistory('assistant', assistantText);
 }
 
 /** 只润色、不带工具：避免"润色"请求被模型当成干活请求 */
@@ -282,11 +322,14 @@ async function polishText(content) {
 
 async function runLLM(text) {
   const cfg = config.getLLM();
-  history.push({ role: 'user', content: text });
-  if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
+  pushHistory('user', text);
 
   const personaCfg = persona.build(config.get('persona', {}));
-  const messages = [{ role: 'system', content: personaCfg.systemPrompt }, ...history];
+  // 情境（时间/待办/记事）是活的，每轮都重新取；persona 只在配置变化时才变
+  const messages = [{ role: 'system', content: personaCfg.systemPrompt }];
+  const ctxBlock = context.build();
+  if (ctxBlock) messages.push({ role: 'system', content: ctxBlock });
+  messages.push(...history);
   const sideEffects = [];
   dbg(
     '[llm] 发起请求 model=', cfg.model,
@@ -306,15 +349,13 @@ async function runLLM(text) {
 
     if (!msg.tool_calls || !msg.tool_calls.length) {
       const content = (msg.content || '').trim() || '……';
-      history.push({ role: 'assistant', content });
-      if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
+      pushHistory('assistant', content);
       if (sideEffects.length) {
         const brief = sideEffects
           .slice(0, 4)
           .map((s) => `${s.tool}:${String(s.message || '').slice(0, 60)}`)
           .join('；');
-        history.push({ role: 'assistant', content: `[已执行] ${brief}` });
-        if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
+        pushHistory('assistant', `[已执行] ${brief}`);
       }
       return { type: 'text', message: content, sideEffects };
     }
@@ -356,8 +397,7 @@ async function runLLM(text) {
       .slice(0, 4)
       .map((s) => `${s.tool}:${String(s.message || '').slice(0, 60)}`)
       .join('；');
-    history.push({ role: 'assistant', content: `[已执行] ${brief}` });
-    if (history.length > HISTORY_LIMIT) history = history.slice(-HISTORY_LIMIT);
+    pushHistory('assistant', `[已执行] ${brief}`);
   }
   return { type: 'text', message: '这个我想太久了，换个说法试试？', sideEffects };
 }
@@ -508,6 +548,7 @@ async function handle(rawInput) {
 
 function resetHistory() {
   history = [];
+  saveHistory();
 }
 
 module.exports = { handle, parseWhen, matchLocal, llmReady, resetHistory, cnToNum, polishText, isComplex };
