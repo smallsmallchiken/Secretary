@@ -16,7 +16,7 @@
 依赖：xdotool xclip import(ImageMagick) tesseract-ocr-chi-sim python3-pil python3-requests
 配置：/tmp/wx_agent_cfg.json   状态：/tmp/wx_agent_state.json   日志：stdout
 """
-import json, os, re, subprocess, time, hashlib, sys, random
+import json, os, re, subprocess, time, hashlib, sys, random, difflib
 import ctypes
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
@@ -1241,6 +1241,63 @@ def tts_wav(text, cfg):
     return out
 
 
+_TITLE_MEMO = []          # 已知会话名：[(canonical, key, size)]
+_TITLE_MEMO_MAX = 400
+
+
+def _title_key(t):
+    """会话名的比较形式：只留汉字/字母/数字，去标点空格和人数后缀。"""
+    return re.sub(r'[\s\W_]+', '', t or '', flags=re.UNICODE)
+
+
+def _title_size(t):
+    """群名末尾的人数 `(237)` —— 同一个群最硬的指纹。"""
+    m = re.search(r'[（(](\d{1,4})[)）]', t or '')
+    return m.group(1) if m else ''
+
+
+def _stable_title(t):
+    """把 OCR 抖出来的标题挂回已知的那个名字。
+
+    会话名是归档的主键，而标题每轮都重新 OCR：「乌鲁木齐欣欣向荣大学生群四(237)」
+    能读成「…群办(237)」，同一秒里 `User` 还能读成 `Liser`。名字一变，归档就多出
+    一个假会话，清单里同一个群被拆成好几节（实测 14 个会话里有 5 个是同一批群的
+    变体）。这里做两件事：
+
+      1. 新名字跟已知名字相似度 ≥0.78（且人数后缀不冲突）就沿用**已知**的那个，
+         不制造新键；
+      2. 短名（G / ER / DHX 这类）只认完全相同，避免「ER」和「FR」互相吞掉。
+    """
+    t = (t or '').strip()
+    if not t:
+        return t
+    key = _title_key(t)
+    size = _title_size(t)
+    if len(key) < 4:
+        for c, ck, _s in _TITLE_MEMO:
+            if ck == key:
+                return c
+        _TITLE_MEMO.append((t, key, size))
+        return t
+    best, best_r = '', 0.0
+    for c, ck, cs in _TITLE_MEMO:
+        if size and cs and size != cs:
+            continue                      # 人数不同 = 另一个群
+        if not ck:
+            continue
+        if ck == key:
+            return c
+        r = difflib.SequenceMatcher(None, key, ck).ratio()
+        if r > best_r:
+            best, best_r = c, r
+    if best and best_r >= 0.78:
+        return best
+    _TITLE_MEMO.append((t, key, size))
+    if len(_TITLE_MEMO) > _TITLE_MEMO_MAX:
+        del _TITLE_MEMO[:100]
+    return t
+
+
 def get_chat_title(img_path, win):
     """聊天区顶部标题 = 当前会话名。
 
@@ -1266,12 +1323,12 @@ def get_chat_title(img_path, win):
     if title and not re.search(r'[\u4e00-\u9fa5A-Za-z0-9]', title):
         alt = re.sub(r'\s+', '', ocr_region(img_path, box, psm=7, lang='eng'))
         if alt:
-            return alt
+            return _stable_title(alt)
     if not title:
         alt = re.sub(r'\s+', '', ocr_region(img_path, box, psm=7, lang='eng'))
         if alt:
-            return alt
-    return title
+            return _stable_title(alt)
+    return _stable_title(title)
 
 
 def is_selected_row_in_strip(strip, origin, row_y):

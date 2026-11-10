@@ -24,6 +24,7 @@
 
 import argparse
 import base64
+import difflib
 import html
 import json
 import os
@@ -162,7 +163,7 @@ def normalize(r, platform):
         'who': ('我' if r.get('me') else (r.get('sn') or r.get('n') or '对方')),
         'chat': r.get('n') or r.get('id') or '?',
         'chat_type': '群聊' if r.get('c') == 'group' else '',
-        'text': str(r.get('x') or ''),
+        'text': clean_text(r.get('x') or ''),
         'kinds': kinds,
         'labels': labels,
         'medias': medias,
@@ -171,6 +172,153 @@ def normalize(r, platform):
         'me': bool(r.get('me')),
         'no': ''
     }
+
+
+_UI_TAIL_RE = re.compile(r'(?:\.{2,}|…)?\s*(?:More|链接文本|查看更多|查看详情|地址定位信息)\s*$')
+_REF_TAIL_RE = re.compile(r'[（(]\s*n\d+\s*[)）]')
+_NOISE_HEAD_RE = re.compile(r'^(?:[A-Z]{1,6}[\s.]+)+(?=[\u4e00-\u9fa5【\[（(])')
+
+
+def clean_text(t):
+    """正文清洗：OCR 噪声、UI 尾巴、模型引用序号。
+
+    监听模式读的是屏幕，脏东西有固定几种形态，都能用规则剥掉：
+      - 开头一串大写拉丁字母（`ROSAS ACT LB A 【时间】…` 头几名是头像/时间戳残影）；
+      - 尾部 `More` / `链接文本` / `地址定位信息`（右键菜单与定位卡片残留）；
+      - `（n15）` 这种给模型看的引用序号，绝不能漏到给人看的清单里。
+    """
+    t = str(t or '').replace('\u200b', '').strip()
+    t = _REF_TAIL_RE.sub('', t)
+    for _ in range(3):
+        n = _UI_TAIL_RE.sub('', t).strip()
+        if n == t:
+            break
+        t = n
+    t = _NOISE_HEAD_RE.sub('', t)
+    return re.sub(r'[ \t]+', ' ', t).strip()
+
+
+def _cmp_key(t):
+    """比较两个人名/会话名/正文用的归一键：去标点空格，小写。"""
+    return re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', str(t or '')).lower()
+
+
+def _chat_size(name):
+    m = re.search(r'[（(](\d{1,4})[)）]', name or '')
+    return m.group(1) if m else ''
+
+
+def merge_chat_names(msgs):
+    """把 OCR 读歪的会话名挂回同一个名字。
+
+    标题每轮都重新 OCR：`乌鲁木齐欣欣向荣大学生群四(237)` 会读成 `…群办(237)`，
+    `QSp乌鲁木齐01家教老师群(382)` 又会读成 `Q&P乌针木齐01家教老师群(382)`。
+    归档按会话名分组，名字一变就多出一个假会话——一份清单里十四个会话，五个是
+    同一批群的变体，看着像进了十几个群。
+
+    合并条件（宁可不合，不可乱合）：
+      - 平台相同；
+      - 两边人数后缀都有时必须相同（`(237)` ≠ `(382)`，那是两个群）；
+      - 归一后名字长度 ≥6 且相似度 ≥0.72；短名（G / ER / DHX）只认完全相同。
+    合并后统一用簇里**出现次数最多、其次最长**的那个名字（OCR 常漏字，长的更全）。
+    """
+    freq = {}
+    first = {}
+    for m in msgs:
+        k = (m['platform'], m['chat'])
+        freq[k] = freq.get(k, 0) + 1
+        if k not in first or m['t'] < first[k]:
+            first[k] = m['t']
+    clusters = []               # [{'names': set, 'key': str, 'size': str, 'plat': str}]
+    for (plat, name), _c in sorted(freq.items(), key=lambda kv: (-kv[1], first[kv[0]])):
+        key = _cmp_key(name)
+        size = _chat_size(name)
+        hit = None
+        if len(key) >= 6:
+            best, best_r = None, 0.0
+            for cl in clusters:
+                if cl['plat'] != plat:
+                    continue
+                # **必须至少一边带人数后缀**：`…群四(237)` / `…群办(237)` 是同一个群，
+                # 但「P*上门家教…胡老师」和「A*卜家教…许老师」这种人名相似度也有 0.8，
+                # 不带后缀一律不合并，宁可留两个真联系人，也不能把两个人并成一个。
+                if not (size or cl['size']):
+                    continue
+                if size and cl['size'] and size != cl['size']:
+                    continue
+                r = difflib.SequenceMatcher(None, key, cl['key']).ratio()
+                if r > best_r:
+                    best, best_r = cl, r
+            if best is not None and best_r >= 0.72:
+                hit = best
+        if hit is None:
+            clusters.append({'names': {name}, 'key': key, 'size': size, 'plat': plat})
+        else:
+            hit['names'].add(name)
+            if len(key) > len(hit['key']):
+                hit['key'] = key
+                hit['size'] = hit['size'] or size
+    canon = {}
+    for cl in clusters:
+        # 主名：出现最多 → 最早出现 → 最长。平票时用「最早读到的那次」，
+        # 后续重读更容易被 OCR 读歪（实测「…群四(237)」第二轮变成「…群办(237)」）。
+        head = min(cl['names'], key=lambda n: (-freq[(cl['plat'], n)],
+                                               first[(cl['plat'], n)], -len(n)))
+        for n in cl['names']:
+            canon[(cl['plat'], n)] = head
+    changed = 0
+    for m in msgs:
+        c = canon.get((m['platform'], m['chat']))
+        if c and c != m['chat']:
+            m['chat_raw'] = m['chat']
+            m['chat'] = c
+            changed += 1
+    return changed, len(clusters)
+
+
+def dedup_near(msgs, window=3600, thr=0.92, look=8):
+    """同一会话里几乎一样的连发只留一条（转发同一段家教信息、OCR 重读一遍）。
+
+    微信监听对着同一屏抓好几轮，同一条长文案被读到两次很常见，流水里就出现
+    两行 95% 相同的字。这里按「平台+会话+发送者」在 1 小时内比相似度：
+
+      - 相似度 ≥0.92，或一方包含另一方 → 同一条，合并；
+      - 前 12 个字（归一后）完全一样且相似度 ≥0.85 → 也是同一条。家教信息都带
+        同一串编号（`WLMQ26111056`、`乌鲁木齐26111032`），OCR 抄歪中间几个字
+        会让整体相似度掉到 0.91，但编号一样就肯定是同一张单子。
+
+    合并时保留**更完整**的那版正文，只记一个 `dup` 次数，渲染成「×2（重发）」。
+    阈值故意偏高：家教群里不同学员的信息结构雷同，放低会把真消息吃掉。
+    """
+    out = []
+    keep_at = {}
+    for m in msgs:
+        if len(m['text']) < 10:
+            out.append(m)
+            continue
+        k = (m['platform'], m['chat'], m['who'])
+        a = _cmp_key(m['text'])
+        sig = a[:12]
+        dropped = None
+        for prev in keep_at.get(k, []):
+            if m['t'] - prev['t'] > window:
+                continue
+            b = _cmp_key(prev['text'])
+            r = difflib.SequenceMatcher(None, a, b).ratio() if b else 0.0
+            if (r >= thr or (len(b) >= 10 and (a in b or b in a))
+                    or (sig == b[:12] and r >= 0.85)):
+                dropped = prev
+                break
+        if dropped is not None:
+            dropped['dup'] = dropped.get('dup', 1) + 1
+            if len(a) > len(_cmp_key(dropped['text'])):
+                dropped['text'] = m['text']        # 留更完整的那版
+            continue
+        out.append(m)
+        keep_at.setdefault(k, []).append(m)
+        if len(keep_at[k]) > look:
+            del keep_at[k][0]
+    return out
 
 
 def load_media_index(day):
@@ -413,8 +561,8 @@ def render_markdown(day, msgs, todos, summary, gallery, note):
     L = []
     L.append('# 每日待办清单 · %s' % day)
     L.append('')
-    L.append('> 只收不发的监听记录｜共 %d 条消息、%d 个会话、%d 个媒体' % (
-        len(msgs), len(group_by_chat(msgs)), len(gallery)))
+    L.append('> 只收不发的监听记录｜共 %d 条消息、%d 个会话、%d 条媒体消息' % (
+        len(msgs), len(group_by_chat(msgs)), len([m for m in msgs if m['labels']])))
     if note:
         L.append('> 模型提炼：%s（已用规则兜底）' % note)
     L.append('')
@@ -428,9 +576,9 @@ def render_markdown(day, msgs, todos, summary, gallery, note):
             L.append('- [ ] **%s**%s ｜ %s · %s · %s' % (
                 t.get('item', ''), pri, t.get('platform', ''),
                 t.get('who', ''), t.get('time', '')))
-            q = t.get('quote') or ''
+            q = _REF_TAIL_RE.sub('', t.get('quote') or '').strip()
             if q:
-                L.append('      - 原话：%s（%s）' % (q, t.get('ref', '')))
+                L.append('      - 原话：%s' % q)
     L.append('')
     if summary:
         L.append('**今日概括**：%s' % summary)
@@ -438,12 +586,23 @@ def render_markdown(day, msgs, todos, summary, gallery, note):
     L.append('## 二、全量流水')
     L.append('')
     for (plat, chat), rows in group_by_chat(msgs):
-        L.append('### %s · %s（%d 条）' % (plat, chat, len(rows)))
+        is_group = any(r['chat_type'] for r in rows) or bool(_chat_size(chat)) or ('群' in chat)
+        L.append('### %s · %s（%s%d 条）' % (
+            plat, chat, '群聊 · ' if is_group else '', len(rows)))
         L.append('')
         for m in rows:
             tags = (' `' + '/'.join(m['labels']) + '`') if m['labels'] else ''
             body = m['text'].replace('\n', ' ') or '（无文字）'
-            L.append('- `%s` **%s**：%s%s' % (bj_time(m['t']), m['who'], body, tags))
+            # 语音条/文件这类消息正文就是类型名，跟右边的标签重复，只留标签
+            if m['labels'] and body.strip('[]（） ') in m['labels']:
+                body = '（无文字）'
+            who = m['who']
+            if who == m['chat']:
+                # 群昵称读不到时归档会沿用群名，私聊则是对方名字跟标题重名，
+                # 两种情况在分组标题里已经写过一遍，正文里不必再重复。
+                who = '群成员' if is_group else '对方'
+            dup = ' ×%d（重发）' % m['dup'] if m.get('dup') else ''
+            L.append('- `%s` **%s**：%s%s%s' % (bj_time(m['t']), who, body, tags, dup))
             for f in m.get('files') or []:
                 # 正文里已经拼过描述（见 enrich_media），这里只在没理解到时
                 # 补一个提示，同一句话不在一条消息里出现两遍。
@@ -461,6 +620,11 @@ def render_markdown(day, msgs, todos, summary, gallery, note):
                 (f.get('desc') or '—').replace('|', '/')))
         L.append('')
     L.append('---')
+    if any(m['platform'] == '微信' for m in msgs):
+        L.append('> 注：微信消息的时间是「监听第一次看到它」的时间。监听是定时截屏的，'
+                 '同一屏里一次抓下来的几条会显示同一个时刻（例如整批 13:34），'
+                 '不代表真实发送顺序；QQ 的时间是服务端事件时间，是准的。')
+        L.append('')
     L.append('生成时间：%s（北京时间）' % bj_stamp())
     return '\n'.join(L)
 
@@ -515,8 +679,8 @@ def render_html(day, msgs, todos, summary, gallery, note):
     P.append('<meta name="viewport" content="width=device-width,initial-scale=1">')
     P.append('<title>每日清单 %s</title><style>%s</style></head><body><div class="wrap">' % (day, CSS))
     P.append('<h1>每日待办清单 · %s</h1>' % day)
-    P.append('<div class="meta">只收不发的监听记录｜%d 条消息 · %d 个会话 · %d 个媒体</div>' % (
-        len(msgs), len(group_by_chat(msgs)), len(gallery)))
+    P.append('<div class="meta">只收不发的监听记录｜%d 条消息 · %d 个会话 · %d 条媒体消息</div>' % (
+        len(msgs), len(group_by_chat(msgs)), len([m for m in msgs if m['labels']])))
     if note:
         P.append('<div class="note">模型提炼未成功（%s），待办已用关键词规则兜底，流水完整。</div>' % E(note))
     P.append('<h2>一、需要我处理的待办</h2>')
@@ -531,21 +695,30 @@ def render_html(day, msgs, todos, summary, gallery, note):
                      hot, '急' if hot else '待办', E(str(t.get('platform', ''))),
                      E(str(t.get('who', ''))), E(str(t.get('time', '')))))
         if t.get('quote'):
-            P.append('<div class="quote">原话：%s （%s）</div>' % (
-                E(str(t['quote'])), E(str(t.get('ref', '')))))
+            P.append('<div class="quote">原话：%s</div>' % (
+                E(_REF_TAIL_RE.sub('', str(t['quote'])).strip())))
         P.append('</div></label>')
     if summary:
         P.append('<h2>今日概括</h2><div class="summary">%s</div>' % E(str(summary)))
     P.append('<h2>二、全量流水</h2>')
     for (plat, chat), rows in group_by_chat(msgs):
-        P.append('<h3>%s · %s（%d 条）</h3><div class="flow">' % (
-            E(str(plat)), E(str(chat)), len(rows)))
+        is_group = any(r['chat_type'] for r in rows) or bool(_chat_size(chat)) or ('群' in chat)
+        P.append('<h3>%s · %s（%s%d 条）</h3><div class="flow">' % (
+            E(str(plat)), E(str(chat)), '群聊 · ' if is_group else '', len(rows)))
         for m in rows:
             tags = ''.join('<span class="kind">%s</span>' % E(x) for x in m['labels'])
+            body = m['text'].replace('\n', ' ') or '（无文字）'
+            if m['labels'] and body.strip('[]（） ') in m['labels']:
+                body = '（无文字）'
+            who = m['who']
+            if who == m['chat']:
+                # 群昵称读不到时归档会沿用群名，私聊则是对方名字跟标题重名，
+                # 两种情况在分组标题里已经写过一遍，正文里不必再重复。
+                who = '群成员' if is_group else '对方'
+            dup = ('<span class="kind">×%d 重发</span>' % m['dup']) if m.get('dup') else ''
             P.append('<div class="row"><span class="ts">%s</span>'
-                     '<span class="who">%s</span><span class="txt">%s%s</span></div>' % (
-                         bj_time(m['t']), E(m['who']),
-                         E(m['text'].replace('\n', ' ') or '（无文字）'), tags))
+                     '<span class="who">%s</span><span class="txt">%s%s%s</span></div>' % (
+                         bj_time(m['t']), E(str(who)), E(body), tags, dup))
             imgs = [f for f in (m.get('files') or []) if not (f.get('desc') or '').strip()]
             if imgs:
                 P.append('<div class="thumbs">')
@@ -585,11 +758,23 @@ def main():
     os.makedirs(out_day, exist_ok=True)
 
     msgs = load_messages(day)
+    # 先把「整理」做完再交给下游：会话名归并 → 近似重发合并 → 重新编号。
+    # 编号必须在这三步之后：编号是待办 ref 与媒体挂载的锚点，中间删过消息
+    # 就会出现 n7/n9 跳号，模型引用的 ref 和流水对不上。
+    n_merge, _cl = merge_chat_names(msgs)
+    n_raw = len(msgs)
+    msgs = dedup_near(msgs)
+    for i, m in enumerate(msgs):
+        m['no'] = 'n%d' % (i + 1)
     index = load_media_index(day)
     # 媒体的描述/转写/正文统一从素材库取（原件理解完就删了，清单里不留二进制）
     lib = load_lib_desc()
     gallery = attach_media(msgs, index, lib)
-    log('%s: %d 条消息, %d 个媒体' % (day, len(msgs), len(gallery)))
+    media_msgs = len([m for m in msgs if m['labels']])
+    log('%s: %d 条消息（合并重发 %d 条）, %d 个会话, %d 条媒体消息, %d 个已理解媒体' % (
+        day, len(msgs), n_raw - len(msgs), len(group_by_chat(msgs)), media_msgs, len(gallery)))
+    if n_merge:
+        log('会话名归并：%d 条消息改挂到主名上' % n_merge)
 
     cfg = load_config()
     if gallery:
