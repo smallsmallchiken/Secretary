@@ -46,7 +46,8 @@ const stage = {
 };
 
 const documentStub = {
-  getElementById: (id) => (id === 'stage' ? stage : id === 'pet' ? canvas : null),
+  getElementById: (id) =>
+    id === 'stage' ? stage : id === 'pet' ? canvas : id === 'unread-badge' || id === 'unread-count' ? badge : null,
   addEventListener: noop // 不触发 DOMContentLoaded，省得造 body
 };
 
@@ -74,11 +75,21 @@ class FakeImage {
 const stateCbs = [];
 const wanderCbs = [];
 const configCbs = [];
+const unreadCbs = [];
+
+// 红点节点桩：pet.js 现在会取 #unread-badge / #unread-count 并挂点击事件
+const badge = {
+  addEventListener: noop,
+  classList: { add: noop, remove: noop },
+  textContent: ''
+};
 
 const petAPI = {
   onState: (cb) => stateCbs.push(cb),
   onWander: (cb) => wanderCbs.push(cb),
   onConfig: (cb) => configCbs.push(cb),
+  onUnread: (cb) => unreadCbs.push(cb),
+  markSeen: () => Promise.resolve({ count: 0 }),
   getConfig: () => Promise.resolve({ behavior: { autoIdle: false, allowWander: true } }),
   click: noop,
   dragStart: noop,

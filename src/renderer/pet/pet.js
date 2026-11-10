@@ -244,6 +244,34 @@ stage.addEventListener('mouseleave', () => {
   }
 });
 
+/* ---------------- 未读红点 ---------------- */
+
+const badge = document.getElementById('unread-badge');
+const badgeCount = document.getElementById('unread-count');
+
+function showUnread(count) {
+  if (!badge) return;
+  const n = Number(count) || 0;
+  if (n > 0) {
+    badgeCount.textContent = n > 99 ? '99+' : String(n);
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+}
+
+window.petAPI.onUnread((payload) => showUnread(payload && payload.count));
+
+// 红点自己吃掉鼠标事件，别触发桌宠的拖动/点击（离线测试没有这个节点，要防 null）
+if (badge && badgeCount) {
+  badge.addEventListener('mousedown', (e) => e.stopPropagation());
+  badge.addEventListener('click', (e) => {
+    e.stopPropagation();
+    badge.classList.add('hidden');
+    window.petAPI.markSeen();
+  });
+}
+
 /* ---------------- 初始化 ---------------- */
 
 img.onload = () => {

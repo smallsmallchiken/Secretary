@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('petAPI', {
   onState: (cb) => ipcRenderer.on('pet:state', (_e, payload) => cb(payload)),
   onConfig: (cb) => ipcRenderer.on('pet:config', (_e, payload) => cb(payload)),
   onWander: (cb) => ipcRenderer.on('pet:wander', (_e, payload) => cb(payload)),
+  onUnread: (cb) => ipcRenderer.on('pet:unread', (_e, payload) => cb(payload)),
+  markSeen: () => ipcRenderer.invoke('unread:seen'),
 
   getConfig: () => ipcRenderer.invoke('config:get')
 });

@@ -504,5 +504,6 @@ module.exports = {
   list, stats, toggle, remove, clearDone,
   syncFromDaily, buildDatabase, refresh,
   parseDaily,
+  readQQ, readWX,
   memoFile, dbFile, dailyDays
 };

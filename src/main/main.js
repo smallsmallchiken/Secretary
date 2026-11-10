@@ -9,6 +9,7 @@ const reminder = require('../core/tools/reminder');
 const remote = require('./remote');
 const memory = require('../core/tools/memory');
 const memo = require('../core/memo');
+const unread = require('../core/unread');
 const mediaReceived = require('../core/media/received');
 const windows = require('./windows');
 const wander = require('./wander');
@@ -124,6 +125,34 @@ async function handleUserMessage(text) {
   setTimeout(() => windows.sendToPet('pet:state', { state: 'idle' }), 2600);
 
   return res;
+}
+
+/* ------------------------------------------------------------------ */
+/* 未读红点：定时拉服务器归档 → 数新消息 → 推给桌宠                       */
+/* ------------------------------------------------------------------ */
+
+let lastUnreadPushed = -1; // -1 = 启动后必推一次（哪怕是 0，让红点初始状态对齐）
+
+/** 重算未读数，变了才推给桌宠（渲染层按 0/正数显隐红点） */
+function pushUnreadCount() {
+  try {
+    const r = unread.countUnread();
+    if (r.count !== lastUnreadPushed) {
+      lastUnreadPushed = r.count;
+      dbg('[unread] 未读数变为', r.count);
+      windows.sendToPet('pet:unread', { count: r.count });
+    }
+  } catch (err) {
+    dbg('[unread] 统计失败:', err.message);
+  }
+}
+
+/** 拉一次服务器（归档+清单），完成后重算红点。拉失败也重算——用本地数据。 */
+function pollUnread() {
+  unread
+    .syncRemote()
+    .catch(() => {})
+    .then(() => pushUnreadCount());
 }
 
 /* ------------------------------------------------------------------ */
@@ -281,7 +310,23 @@ function registerIpc() {
     } catch (err) {
       dbg('[memo] 拉取服务器清单失败（继续用本地）:', err.message);
     }
-    return memo.refresh();
+    const r = memo.refresh();
+    // 手动刷新也会带回新数据，红点跟着重算
+    pushUnreadCount();
+    return r;
+  });
+
+  /* ---------------- 未读红点 ---------------- */
+  // 点红点 = 记下「已看到」，红点归零并广播给桌宠。
+  ipcMain.handle('unread:seen', () => {
+    const r = unread.markSeen();
+    pushUnreadCount();
+    return r;
+  });
+  // 手动触发一次「拉服务器 + 重算」（调试 / 用户想立刻刷新时用）
+  ipcMain.handle('unread:poll', () => {
+    pollUnread();
+    return { ok: true };
   });
 
   ipcMain.handle('memo:open-database', async () => {
@@ -499,6 +544,16 @@ app.whenReady().then(() => {
   });
 
   applyAutoLaunch(config.get('autoLaunch'));
+
+  // 未读红点：首次启用先做基线（历史消息不算未读），然后立刻拉一次服务器；
+  // 之后每 5 分钟轮询一次——红点最多延迟 5 分钟亮起。
+  try {
+    unread.baselineIfEmpty();
+    setTimeout(pollUnread, 15 * 1000); // 等窗口都建好再推，别让 IPC 丢在空渲染层上
+    setInterval(pollUnread, 5 * 60 * 1000);
+  } catch (err) {
+    dbg('[unread] 启动失败:', err.message);
+  }
 
   // 存活心跳：进程若是静默死亡，至少能从日志推断死亡时间
   setInterval(() => dbg('[alive] 还活着'), 5 * 60 * 1000);

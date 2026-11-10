@@ -90,7 +90,7 @@ function makeClassList() {
 
 /** 每个场景加载一份新的 pet.js 到新 vm 上下文，互不污染 */
 function loadPet() {
-  const listeners = { stage: {}, window: {} };
+  const listeners = { stage: {}, window: {}, badge: {} };
   const classList = makeClassList();
   const calls = { dragStart: 0, dragMove: 0, dragEnd: 0, click: 0 };
   const canvas = makeCanvas();
@@ -103,7 +103,21 @@ function loadPet() {
   };
 
   const documentStub = {
-    getElementById: (id) => (id === 'stage' ? stageEl : id === 'pet' ? canvas : null),
+    getElementById: (id) => {
+      if (id === 'stage') return stageEl;
+      if (id === 'pet') return canvas;
+      if (id === 'unread-badge' || id === 'unread-count') {
+        // 红点节点桩：pet.js 会往上面挂 mousedown/click 事件
+        return {
+          addEventListener: (type, cb) => {
+            (listeners.badge[type] = listeners.badge[type] || []).push(cb);
+          },
+          classList,
+          textContent: ''
+        };
+      }
+      return null;
+    },
     addEventListener: noop
   };
 
@@ -126,6 +140,8 @@ function loadPet() {
       onState: noop,
       onWander: noop,
       onConfig: noop,
+      onUnread: noop,
+      markSeen: () => Promise.resolve({ count: 0 }),
       getConfig: () => Promise.resolve({ behavior: { autoIdle: false, allowWander: true } }),
       click: () => (calls.click += 1),
       dragStart: () => (calls.dragStart += 1),

@@ -19,6 +19,7 @@ body {
    给 #stage 加 scale 只会被裁掉边，而且悬停 / 按下时改尺寸，
    看起来就是"点一下就变大"。情绪表达交给 stand / bounce 的位移就够了。 */
 #stage {
+  position: relative; /* 红点的定位锚 */
   width: 100%;
   height: 100%;
   display: flex;
@@ -57,4 +58,37 @@ canvas {
   image-rendering: auto;
   pointer-events: auto;
   filter: drop-shadow(0 6px 8px rgba(0, 0, 0, 0.28));
+}
+
+/* ---------------- 未读红点 ---------------- */
+/* 右上角红点：有几条新消息就显示几，点击后消失 */
+#unread-badge {
+  position: absolute;
+  top: 4%;
+  right: 4%;
+  min-width: 15%;
+  height: 15%;
+  padding: 0 2.5%;
+  border-radius: 999px;
+  background: #e5484d;
+  color: #fff;
+  font: bold 10vmin/normal "Segoe UI", "Microsoft YaHei", sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  pointer-events: auto;
+  z-index: 10;
+  transition: opacity 0.15s ease;
+}
+
+#unread-badge:hover {
+  background: #c7363b; /* 不能用 scale：桌宠窗口只有画布大，任何放大都会被裁边 */
+}
+
+#unread-badge.hidden {
+  opacity: 0;
+  pointer-events: none;
 }
