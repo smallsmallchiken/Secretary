@@ -50,9 +50,6 @@ MODEL = 'deepseek-ai/DeepSeek-V4.1-Flash'
 VISION_MODEL = 'Qwen/Qwen3-VL-32B-Instruct'
 ASR_MODEL = 'FunAudioLLM/SenseVoiceSmall'
 MAX_MODEL_CHARS = 14000          # 喂给模型的流水上限，防超长
-MAX_MEDIA_COPY = 20 * 1024 * 1024  # 单个媒体超过 20MB 只留路径不复制
-MAX_ENRICH = 60                  # 每天最多转写/描述多少个媒体，防限流和烧钱
-                                 # 微信每条消息都带截图，30 不够用，放宽到 60
 
 KIND_LABEL = {
     'text': '文字', 'image': '图片', 'sticker': '表情包', 'mface': '表情包',
@@ -113,16 +110,25 @@ def load_messages(day):
     for r in read_jsonl(qq_path):
         out.append(normalize(r, 'QQ'))
     # 微信归档：同步后的 wechat/wx-YYYY-MM-DD.jsonl 优先，容器原始目录兜底
+    # **容器原件优先**：`wechat/` 那份是宿主机每分钟按字节偏移同步的副本，
+    # 可能是旧版本（比如正文刚被视觉模型修补过），先读它会让修补失效、
+    # 同一条消息按旧正文出现。原件永远是最新的，副本只补它还没同步到的那几条。
     wx_paths = [
-        os.path.join(WX_ARCHIVE, 'wx-' + day + '.jsonl'),
-        '/opt/linux-im/archive/wx-' + day + '.jsonl'
+        '/opt/linux-im/archive/wx-' + day + '.jsonl',
+        os.path.join(WX_ARCHIVE, 'wx-' + day + '.jsonl')
     ]
     seen = set()
     for p in wx_paths:
         if not os.path.exists(p):
             continue
         for r in read_jsonl(p):
-            key = (r.get('t'), r.get('id'), r.get('x'), r.get('k'))
+            # 去重键用「时间 + 会话 + 指纹」：**不能带正文**。
+            # 同步副本可能比原件旧一分钟，而正文会被后续修补（比如把
+            # `[文件]` 换成视觉模型读出的文字），一带正文就对不上，同一条
+            # 消息会在流水里出现两遍（实测 50 条被算成 67 条）。
+            key = (r.get('t'), r.get('id'), r.get('mid'))
+            if not r.get('mid'):
+                key = (r.get('t'), r.get('id'), r.get('x'), r.get('k'))
             if key in seen:
                 continue
             seen.add(key)
@@ -182,9 +188,31 @@ def load_media_index(day):
     return index
 
 
-def attach_media(msgs, index, day, media_dir):
-    """把索引里的文件复制进清单目录，返回媒体清单与每条消息的缩略图。"""
-    # 按 (平台, mid) 预先分组，别在消息循环里遍历整张索引（O(n²)）
+def load_lib_desc():
+    """读素材库已经理解好的文字，按消息指纹 mid 索引。
+
+    只存文字之后，原件（图片/语音/文件/截图）在理解完就被删了，清单不能再
+    靠文件路径去找内容，必须直接复用 media_lib.py 的成果。这样也避免了
+    清单和素材库各调一次模型、两份描述说法不一样。
+    """
+    out = {}
+    p = os.path.join(ROOT, 'media', 'received', 'library.jsonl')
+    for r in read_jsonl(p):
+        mid = str(r.get('mid') or '')
+        if not mid or mid in out:
+            continue
+        txt = (r.get('desc') or r.get('text') or '').strip()
+        if txt:
+            out[mid] = re.sub(r'\s+', ' ', txt)[:300]
+    return out
+
+
+def attach_media(msgs, index, lib=None):
+    """给每条消息挂上「这条媒体是什么」的文字说明。
+
+    不再复制任何文件：素材库理解完就删原件，清单目录里也不留二进制。
+    """
+    lib = lib or {}
     by_mid = {}
     for (p, mid, i), rr in index.items():
         by_mid.setdefault((p, str(mid)), []).extend(rr)
@@ -192,185 +220,49 @@ def attach_media(msgs, index, day, media_dir):
     for m in msgs:
         plat = 'QQ' if m['platform'] in ('QQ', 'qq') else '微信'
         m['files'] = []
-        # 微信截图直接来自归档的 shot 字段
+        rows = []
         if m['shot']:
-            src = os.path.join(WX_INBOX, m['shot'])
-            item = copy_media(src, media_dir, plat, m, '截图')
-            if item:
-                m['files'].append(item)
-                gallery.append(item)
+            rows.append({'type': '', 'label': '截图'})
         for r in by_mid.get((plat, str(m['mid'])), []):
-            f = r.get('file') or ''
-            if not f:
-                continue
-            src = f if os.path.isabs(f) else os.path.join(
-                QQ_INBOX if plat == 'QQ' else WX_INBOX, f)
-            # QQ 索引里的 file 是相对 .data 的（inbox/<日期>/qq/…）
-            if plat == 'QQ' and f.startswith('inbox/'):
-                src = os.path.join(ROOT, f)
-            item = copy_media(src, media_dir, plat, m,
-                              KIND_LABEL.get(r.get('type'), r.get('type') or '媒体'))
-            if item:
-                m['files'].append(item)
-                gallery.append(item)
+            rows.append({'type': r.get('type') or '',
+                         'label': KIND_LABEL.get(r.get('type'), r.get('type') or '媒体')})
+        for r in rows:
+            desc = lib.get(str(m['mid']), '')
+            item = {'label': r['label'], 'desc': desc, 'chat': m['chat'],
+                    'time': bj_time(m['t']), 'platform': plat, 'no': m['no'],
+                    'size': 0}
+            m['files'].append(item)
+            gallery.append(item)
     return gallery
 
 
-def copy_media(src, media_dir, plat, m, label):
-    if not src or not os.path.exists(src):
-        return None
-    try:
-        size = os.path.getsize(src)
-    except Exception:
-        return None
-    name = '%s_%s_%s' % (m['no'], re.sub(r'\W+', '_', plat), os.path.basename(src))
-    name = re.sub(r'[^\w.\-]', '_', name)[:120]
-    dst = os.path.join(media_dir, name)
-    local = name if size <= MAX_MEDIA_COPY else ''
-    if local:
-        try:
-            if not os.path.exists(dst):
-                shutil.copy2(src, dst)
-        except Exception:
-            local = ''
-    return {'label': label, 'path': src, 'local': local,
-            'size': size, 'chat': m['chat'], 'time': bj_time(m['t']),
-            'platform': plat, 'no': m['no']}
 
+def enrich_media(msgs, gallery, cfg=None, out_day=None):
+    """把素材库理解好的描述回填到消息正文。
 
-def _api_post(cfg, tail, payload, timeout=60):
-    llm = cfg.get('llm') or {}
-    key = llm.get('apiKey') or ''
-    if not key:
-        return None
-    base = (llm.get('baseUrl') or 'https://api.siliconflow.cn/v1').rstrip('/')
-    if not base.endswith('/v1'):
-        base += '/v1'
-    req = urllib.request.Request(
-        base + tail, data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as res:
-            return json.loads(res.read().decode('utf-8'))
-    except Exception as e:
-        log('媒体理解失败 %s: %s' % (tail, e))
-        return None
-
-
-def _asr(cfg, path):
-    """语音转文字。multipart 用标准库手搓（服务器没 requests）。"""
-    llm = cfg.get('llm') or {}
-    key = llm.get('apiKey') or ''
-    if not key:
-        return ''
-    base = (llm.get('baseUrl') or 'https://api.siliconflow.cn/v1').rstrip('/')
-    if not base.endswith('/v1'):
-        base += '/v1'
-    try:
-        raw = open(path, 'rb').read()
-    except Exception:
-        return ''
-    b = '----daily%d' % int(time.time() * 1000)
-    parts = []
-    parts.append(('--%s\r\nContent-Disposition: form-data; name="model"\r\n\r\n%s\r\n'
-                  % (b, ASR_MODEL)).encode('utf-8'))
-    parts.append(('--%s\r\nContent-Disposition: form-data; name="file"; filename="v.mp3"\r\n'
-                  'Content-Type: audio/mpeg\r\n\r\n' % b).encode('utf-8') + raw + b'\r\n')
-    parts.append(('--%s--\r\n' % b).encode('utf-8'))
-    req = urllib.request.Request(
-        base + '/audio/transcriptions', data=b''.join(parts),
-        headers={'Content-Type': 'multipart/form-data; boundary=' + b,
-                 'Authorization': 'Bearer ' + key})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as res:
-            d = json.loads(res.read().decode('utf-8'))
-        return (d.get('text') or '').strip()[:300]
-    except Exception as e:
-        log('ASR 失败: %s' % e)
-        return ''
-
-
-def _vision(cfg, path, prompt):
-    """让视觉模型读一张图。QQ 的原图与微信的气泡截图都走这里。"""
-    try:
-        b64 = base64.b64encode(open(path, 'rb').read()).decode('ascii')
-        mime = 'image/png' if path.lower().endswith('.png') else 'image/jpeg'
-        d = _api_post(cfg, '/chat/completions', {
-            'model': VISION_MODEL,
-            'messages': [{'role': 'user', 'content': [
-                {'type': 'text', 'text': prompt},
-                {'type': 'image_url',
-                 'image_url': {'url': 'data:%s;base64,%s' % (mime, b64)}}
-            ]}],
-            'max_tokens': 80, 'temperature': 0.2, 'stream': False
-        }, timeout=60)
-        if d:
-            return (d['choices'][0]['message']['content'] or '').strip()[:100]
-    except Exception as e:
-        log('视觉描述失败: %s' % e)
-    return ''
-
-
-def enrich_media(msgs, gallery, cfg, out_day):
-    """媒体做内容理解：QQ 语音转文字、QQ 原图/微信截图生成描述。
-
-    用户要的是「以待后续处理」的清单——只丢一个 [语音] 标记或一个
-    「鱼 / 可 / 做」这种 OCR 噪声没法处理，必须能读到里面是什么。
-    微信 4.1.26 拿不到原始文件，但**气泡截图本身就是图**，视觉模型能
-    读出卡片文字、认出表情和图片内容，所以一样要理解，不能只挂着链接。
-    结果缓存到 media_desc.json，重跑不重复烧钱。
+    以前这里会再调一次视觉/ASR：同一张图清单理解一遍、素材库又理解一遍，
+    钱翻倍，两处说法还可能不一样。现在统一以素材库为准，这里只做回填。
     """
-    cache_path = os.path.join(out_day, 'media_desc.json')
-    cache = {}
-    if os.path.exists(cache_path):
-        try:
-            cache = json.load(open(cache_path, 'r', encoding='utf-8'))
-        except Exception:
-            cache = {}
-    done = 0
+    n = 0
+    by_no = {}
+    for m in msgs:
+        by_no.setdefault(m['no'], m)
     for f in gallery:
-        if not f['local']:
+        desc = (f.get('desc') or '').strip()
+        if not desc:
             continue
-        key = f['path']
-        if key in cache:
-            desc = cache[key]
-        elif done >= MAX_ENRICH:
+        m = by_no.get(f['no'])
+        if not m:
             continue
+        if not m['text']:
+            m['text'] = desc
+        elif m['text'].startswith('['):
+            # 保留类型标记：'[图片] 一只橘猫趴在键盘上'
+            m['text'] = '%s %s' % (m['text'], desc)
         else:
-            p = os.path.join(out_day, 'media', f['local'])
-            typ = f['label']
-            desc = ''
-            if typ in ('语音', '语音条'):
-                desc = _asr(cfg, p)
-            elif typ == '截图':
-                desc = _vision(cfg, p,
-                               '这是微信消息气泡的截图。用一句中文概括这条消息：'
-                               '如果是文字或卡片，写出主要内容；如果是图片/表情/'
-                               '语音条/视频/文件，说明类型和画面。40字内，不要解释。')
-            elif typ in ('图片', '表情包', '表情', '视频'):
-                desc = _vision(cfg, p,
-                               '用一句中文说明这张图/表情包的内容或表达的情绪，20字内，不要解释。')
-            # 失败的（空描述）不要写进缓存：定时报告每小时重跑一次，
-            # 让限流/网络抖动能在下一轮自己恢复，别把失败固化住。
-            if desc:
-                cache[key] = desc
-            done += 1
-        f['desc'] = desc
-        if desc:
-            # 描述回填到对应消息，流水和待办提炼都能读到
-            for m in msgs:
-                if m['no'] == f['no']:
-                    if not m['text'] or m['text'].startswith('['):
-                        m['text'] = desc
-                    else:
-                        m['text'] += '（%s）' % desc
-                    break
-    try:
-        with open(cache_path, 'w', encoding='utf-8') as fh:
-            json.dump(cache, fh, ensure_ascii=False, indent=1)
-    except Exception:
-        pass
-    return sum(1 for f in gallery if f.get('desc'))
+            m['text'] += '（%s）' % desc
+        n += 1
+    return n
 
 
 def build_flow_text(msgs):
@@ -517,7 +409,7 @@ def render_markdown(day, msgs, todos, summary, gallery, note):
     L = []
     L.append('# 每日待办清单 · %s' % day)
     L.append('')
-    L.append('> 只收不发的监听记录｜共 %d 条消息、%d 个会话、%d 个媒体文件' % (
+    L.append('> 只收不发的监听记录｜共 %d 条消息、%d 个会话、%d 个媒体' % (
         len(msgs), len(group_by_chat(msgs)), len(gallery)))
     if note:
         L.append('> 模型提炼：%s（已用规则兜底）' % note)
@@ -549,27 +441,20 @@ def render_markdown(day, msgs, todos, summary, gallery, note):
             body = m['text'].replace('\n', ' ') or '（无文字）'
             L.append('- `%s` **%s**：%s%s' % (bj_time(m['t']), m['who'], body, tags))
             for f in m.get('files') or []:
-                if f['local']:
-                    L.append('  - [%s](media/%s)' % (f['label'], f['local']))
-                else:
-                    L.append('  - %s：%s' % (f['label'], f['path']))
+                # 正文里已经拼过描述（见 enrich_media），这里只在没理解到时
+                # 补一个提示，同一句话不在一条消息里出现两遍。
+                if not (f.get('desc') or '').strip():
+                    L.append('  - %s（素材库还没理解出来）' % f['label'])
         L.append('')
     if gallery:
-        L.append('## 三、媒体文件清单')
+        L.append('## 三、媒体内容清单')
         L.append('')
-        L.append('| 时间 | 平台 | 会话 | 类型 | 转写/描述 | 文件 |')
-        L.append('|---|---|---|---|---|---|')
+        L.append('| 时间 | 平台 | 会话 | 类型 | 转写/描述 |')
+        L.append('|---|---|---|---|---|')
         for f in gallery:
-            # 清单目录要能整包拷走离线看，所以给的是 media/ 里的相对链接，
-            # 不是服务器上的源绝对路径（后者拷走后必然失效，还把目录结构暴露出去）。
-            if f['local']:
-                cell = '[`%s`](media/%s)' % (f['local'], f['local'])
-            else:
-                cell = '`%s`（超过 %dMB，未随清单复制）' % (
-                    os.path.basename(f['path']), MAX_MEDIA_COPY // 1024 // 1024)
-            L.append('| %s | %s | %s | %s | %s | %s |' % (
+            L.append('| %s | %s | %s | %s | %s |' % (
                 f['time'], f['platform'], f['chat'], f['label'],
-                (f.get('desc') or '—').replace('|', '/'), cell))
+                (f.get('desc') or '—').replace('|', '/')))
         L.append('')
     L.append('---')
     L.append('生成时间：%s（北京时间）' % bj_stamp())
@@ -626,7 +511,7 @@ def render_html(day, msgs, todos, summary, gallery, note):
     P.append('<meta name="viewport" content="width=device-width,initial-scale=1">')
     P.append('<title>每日清单 %s</title><style>%s</style></head><body><div class="wrap">' % (day, CSS))
     P.append('<h1>每日待办清单 · %s</h1>' % day)
-    P.append('<div class="meta">只收不发的监听记录｜%d 条消息 · %d 个会话 · %d 个媒体文件</div>' % (
+    P.append('<div class="meta">只收不发的监听记录｜%d 条消息 · %d 个会话 · %d 个媒体</div>' % (
         len(msgs), len(group_by_chat(msgs)), len(gallery)))
     if note:
         P.append('<div class="note">模型提炼未成功（%s），待办已用关键词规则兜底，流水完整。</div>' % E(note))
@@ -657,29 +542,20 @@ def render_html(day, msgs, todos, summary, gallery, note):
                      '<span class="who">%s</span><span class="txt">%s%s</span></div>' % (
                          bj_time(m['t']), E(m['who']),
                          E(m['text'].replace('\n', ' ') or '（无文字）'), tags))
-            imgs = [f for f in (m.get('files') or []) if f['local']]
+            imgs = [f for f in (m.get('files') or []) if not (f.get('desc') or '').strip()]
             if imgs:
                 P.append('<div class="thumbs">')
                 for f in imgs:
-                    P.append('<a href="media/%s" target="_blank"><img src="media/%s" '
-                             'alt="%s"><div class="cap">%s</div></a>' % (
-                                 E(f['local']), E(f['local']), E(f['label']), E(f['label'])))
+                    P.append('<div class="cap">%s（素材库还没理解出来）</div>' % E(f['label']))
                 P.append('</div>')
         P.append('</div>')
     if gallery:
-        P.append('<h2>三、媒体文件清单</h2><table><tr><th>时间</th><th>平台</th>'
-                 '<th>会话</th><th>类型</th><th>转写/描述</th><th>文件</th></tr>')
+        P.append('<h2>三、媒体内容清单</h2><table><tr><th>时间</th><th>平台</th>'
+                 '<th>会话</th><th>类型</th><th>转写/描述</th></tr>')
         for f in gallery:
-            if f['local']:
-                cell = '<a href="media/%s" target="_blank"><code>%s</code></a>' % (
-                    E(f['local']), E(f['local']))
-            else:
-                cell = '<code>%s</code>（超过 %dMB，未随清单复制）' % (
-                    E(os.path.basename(f['path'])), MAX_MEDIA_COPY // 1024 // 1024)
-            P.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
-                     '<td>%s</td></tr>' % (
-                         f['time'], E(f['platform']), E(str(f['chat'])), E(f['label']),
-                         E(str(f.get('desc') or '—')), cell))
+            P.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (
+                f['time'], E(f['platform']), E(str(f['chat'])), E(f['label']),
+                E(str(f.get('desc') or '—'))))
         P.append('</table>')
     P.append('<footer>生成于 %s（北京时间）· 勾选状态保存在本浏览器</footer>' % bj_stamp())
     P.append('''<script>
@@ -702,18 +578,19 @@ def main():
     a = ap.parse_args()
     day = a.date or (bj_day(time.time() - 86400) if a.yesterday else bj_day())
     out_day = os.path.join(a.out, day)
-    media_dir = os.path.join(out_day, 'media')
-    os.makedirs(media_dir, exist_ok=True)
+    os.makedirs(out_day, exist_ok=True)
 
     msgs = load_messages(day)
     index = load_media_index(day)
-    gallery = attach_media(msgs, index, day, media_dir)
-    log('%s: %d 条消息, %d 个媒体文件' % (day, len(msgs), len(gallery)))
+    # 媒体的描述/转写/正文统一从素材库取（原件理解完就删了，清单里不留二进制）
+    lib = load_lib_desc()
+    gallery = attach_media(msgs, index, lib)
+    log('%s: %d 条消息, %d 个媒体' % (day, len(msgs), len(gallery)))
 
     cfg = load_config()
-    if gallery and not a.no_llm:
-        n = enrich_media(msgs, gallery, cfg, out_day)
-        log('媒体内容理解：%d 个拿到描述/转写' % n)
+    if gallery:
+        n = enrich_media(msgs, gallery)
+        log('媒体描述回填：%d 条（来自素材库）' % n)
 
     todos, summary, note = [], '', ''
     if msgs and not a.no_llm:

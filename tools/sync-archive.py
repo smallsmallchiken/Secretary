@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-把服务器上的 QQ 归档同步到本地。
+把服务器上的 QQ 与微信归档同步到本地。
 
 为什么要同步：桌宠每次查询都 SSH 过去要 5~6 秒（握手 + docker exec + node 启动），
 聊天里等这么久体验太差。归档是每天一个 JSONL 文件、一天才几百 KB，
@@ -74,25 +74,32 @@ def main():
         client.connect(**kw)
         sftp = client.open_sftp()
 
-        try:
-            entries = sftp.listdir_attr(REMOTE_DIR)
-        except IOError:
-            print(json.dumps({"ok": True, "pulled": [], "total": 0, "note": "服务器上还没有归档"}, ensure_ascii=False))
-            return 0
-
-        for ent in entries:
-            name = ent.filename
-            if not name.endswith(".jsonl"):
+        # 两个平台一起拉：QQ 是平铺的 YYYY-MM-DD.jsonl，微信在 wechat/ 子目录里
+        # 叫 wx-YYYY-MM-DD.jsonl。以前只同步平铺目录，微信归档永远到不了本地，
+        # 桌面消息库就只有 QQ —— 用户明确要求「微信也要一样的同步」。
+        targets = [
+            (REMOTE_DIR, LOCAL_DIR),
+            (posixpath.join(REMOTE_DIR, "wechat"), os.path.join(LOCAL_DIR, "wechat")),
+        ]
+        for remote_dir, local_dir in targets:
+            try:
+                entries = sftp.listdir_attr(remote_dir)
+            except IOError:
                 continue
-            local = os.path.join(LOCAL_DIR, name)
-            # 增量：本地已有且不小于远端就跳过（归档只追加，文件只会变大）
-            if not args.force and os.path.exists(local) and os.path.getsize(local) >= ent.st_size:
-                skipped += 1
-                continue
-            # 远端路径必须用 posixpath 拼：在 Windows 上 os.path.join 会拼出反斜杠，
-            # SFTP 那边就找不到文件（踩过一次，"No such file" 但远端明明有）
-            sftp.get(posixpath.join(REMOTE_DIR, name), local)
-            pulled.append(name)
+            os.makedirs(local_dir, exist_ok=True)
+            for ent in entries:
+                name = ent.filename
+                if not name.endswith(".jsonl"):
+                    continue
+                local = os.path.join(local_dir, name)
+                # 增量：本地已有且不小于远端就跳过（归档只追加，文件只会变大）
+                if not args.force and os.path.exists(local) and os.path.getsize(local) >= ent.st_size:
+                    skipped += 1
+                    continue
+                # 远端路径必须用 posixpath 拼：在 Windows 上 os.path.join 会拼出反斜杠，
+                # SFTP 那边就找不到文件（踩过一次，"No such file" 但远端明明有）
+                sftp.get(posixpath.join(remote_dir, name), local)
+                pulled.append(name)
 
         sftp.close()
     except Exception as e:
@@ -104,16 +111,17 @@ def main():
         except Exception:
             pass
 
-    # 数一下本地总共多少条
+    # 数一下本地总共多少条（QQ 平铺 + 微信子目录都要算）
     total = 0
-    for name in os.listdir(LOCAL_DIR):
-        if not name.endswith(".jsonl"):
-            continue
-        try:
-            with open(os.path.join(LOCAL_DIR, name), "r", encoding="utf-8", errors="replace") as f:
-                total += sum(1 for line in f if line.strip())
-        except Exception:
-            pass
+    for dirpath, _dirs, files in os.walk(LOCAL_DIR):
+        for name in files:
+            if not name.endswith(".jsonl"):
+                continue
+            try:
+                with open(os.path.join(dirpath, name), "r", encoding="utf-8", errors="replace") as f:
+                    total += sum(1 for line in f if line.strip())
+            except Exception:
+                pass
 
     print(json.dumps({"ok": True, "pulled": pulled, "skipped": skipped, "total": total}, ensure_ascii=False))
     return 0

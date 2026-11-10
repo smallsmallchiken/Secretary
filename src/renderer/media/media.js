@@ -14,7 +14,7 @@ const btnRefresh = document.getElementById('btn-refresh');
 const btnDir = document.getElementById('btn-dir');
 
 const KIND_ICON = {
-  voice: '🎙', video: '🎬', file: '📄', other: '📦'
+  image: '🖼', sticker: '😀', voice: '🎙', video: '🎬', file: '📄', other: '📦'
 };
 const KIND_TITLE = {
   sticker: '表情包', image: '图片', voice: '语音',
@@ -56,50 +56,27 @@ function renderCount() {
   countEl.textContent = `共 ${s.total || 0}${bits.length ? ' · ' + bits.join(' · ') : ''}${tail}`;
 }
 
-/** 图片/表情格子 */
-function cellFor(it) {
-  const c = el('div', 'cell');
-  if (!it.local) {
-    c.classList.add('missing');
-    c.textContent = `未同步\n${it.sizeText}`;
-    c.title = `${it.desc || it.name || it.file}\n本地还没有这个文件，点「同步」拉取`;
-    return c;
-  }
-  const img = document.createElement('img');
-  img.src = it.url;
-  img.alt = it.desc || it.name || '';
-  img.loading = 'lazy';
-  c.appendChild(img);
-  if (it.kind === 'sticker') {
-    c.appendChild(el('div', 'badge', '表情'));
-  } else if (it.msgkind) {
-    c.appendChild(el('div', 'badge', (KIND_TITLE[it.msgkind] || '') + '截图'));
-  }
-  const cap = it.desc || it.name || it.chat || '';
-  if (cap) c.appendChild(el('div', 'cap', cap));
-  c.title = [it.desc, (it.tags || []).join(' / '), it.chat, it.time].filter(Boolean).join('\n');
-  c.addEventListener('click', () => openViewer(it));
-  return c;
-}
-
-/** 语音/视频/文件行 */
+/** 语音/视频/文件行——现在图片和表情也走这里。
+ *
+ * 只存文字之后，图片被理解完就删了原件，本地没有可显示的缩略图，网格
+ * 全变成「未同步」的灰格子没有意义。统一用文字卡片：描述就是这张图的全部。
+ */
 function rowFor(it) {
   const r = el('div', 'row');
-  r.appendChild(el('div', 'ico', KIND_ICON[it.kind] || '📄'));
+  r.appendChild(el('div', 'ico', KIND_ICON[it.kind] || KIND_ICON.other));
   const body = el('div', 'body');
 
   const l1 = el('div', 'line1');
-  const title = it.name || it.desc || (KIND_TITLE[it.kind] || '素材');
+  const title = it.desc || it.name || (KIND_TITLE[it.kind] || '素材');
   l1.appendChild(el('span', 'name', title));
   l1.appendChild(el('span', 'sz', it.sizeText));
   body.appendChild(l1);
 
-  // 语音显示转写、文件显示正文摘要：这就是「能理解」的部分，
+  // 语音显示转写、文件显示正文摘要、图片显示描述：这就是「能理解」的部分，
   // 只给一个文件名的清单没法用。
-  const txt = it.text || it.desc || '';
+  const txt = it.text || (it.desc && it.desc !== title ? it.desc : '');
   if (txt) {
-    const t = el('div', 'txt', txt);
-    body.appendChild(t);
+    body.appendChild(el('div', 'txt', txt));
   } else if (it.note) {
     body.appendChild(el('div', 'txt', it.note));
   }
@@ -114,6 +91,12 @@ function rowFor(it) {
   if (meta) body.appendChild(el('div', 'meta', meta));
 
   r.appendChild(body);
+
+  // 老条目/还没清理的原件如果本地还在，点开还能看
+  if (it.local) {
+    r.style.cursor = 'zoom-in';
+    r.addEventListener('click', () => openViewer(it));
+  }
   return r;
 }
 
@@ -146,15 +129,9 @@ function render() {
       h.textContent = `${KIND_TITLE[k] || k} · ${arr.length}`;
       listEl.appendChild(h);
     }
-    if (k === 'image' || k === 'sticker') {
-      const g = el('div', 'grid');
-      for (const it of arr) g.appendChild(cellFor(it));
-      listEl.appendChild(g);
-    } else {
-      const wrap = el('div', 'rows');
-      for (const it of arr) wrap.appendChild(rowFor(it));
-      listEl.appendChild(wrap);
-    }
+    const wrap = el('div', 'rows');
+    for (const it of arr) wrap.appendChild(rowFor(it));
+    listEl.appendChild(wrap);
   }
 }
 

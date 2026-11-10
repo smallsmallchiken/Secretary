@@ -59,6 +59,13 @@ MD_FILE = os.path.join(LIB, '素材库.md')
 
 # 每次运行最多理解多少个：视觉/语音都是按次计费，定时跑要有个闸
 MAX_UNDERSTAND = 80
+# 理解失败的素材多久之后才重试（秒）。cron 是每分钟一次，不退避会变成
+# 「每分钟一次无效请求」。
+FAIL_BACKOFF = 600
+# 只存文字：理解完立刻删原件（图片/文件/语音/视频都不留）。理解失败的要
+# 留着重试，但最多留这么久，超龄连原件一起删，只记一条「没理解成」的元信息。
+# 不设上限的话，一个一直失败的坏文件会永久占着磁盘。
+KEEP_SRC_DAYS = 3
 # 超过这个大小的文件不进理解（也不复制），只记元信息
 MAX_INGEST = 64 * 1024 * 1024
 # 抽正文时最多读多少字符，太长的文件截断
@@ -465,8 +472,19 @@ DESC_PROMPT = (
     '标签用 2-4 个短词，便于以后检索。不要解释，不要换行。'
 )
 
+# 微信只有气泡截图，图里带着聊天背景、头像、时间戳。用原 prompt 会把
+# 「截图边框」也描述进去（「一张微信聊天截图，右下角有绿色气泡」），
+# 对检索毫无用处。这里明确要求只看消息内容本身。
+SHOT_PROMPT = (
+    '这是一条微信消息的气泡截图。忽略聊天背景、头像、时间戳和气泡边框，'
+    '只描述这条消息本身：是图片、表情包、语音条、视频还是文件，内容是什么。\n'
+    '用一行中文回答，格式严格为：<一句话描述>|<标签1,标签2,标签3>\n'
+    '描述不超过 30 字（语音/视频请写出画面里的时长或文字），标签 2-4 个短词。'
+    '不要解释，不要换行。'
+)
 
-def _vision_raw(cfg, path):
+
+def _vision_raw(cfg, path, prompt=None):
     """一次调用同时拿到描述和标签，比调两次省一半。"""
     w, h = image_size(path)
     if w and h and (w < MIN_VISION_SIDE or h < MIN_VISION_SIDE):
@@ -479,7 +497,7 @@ def _vision_raw(cfg, path):
     d = _api_post(cfg, '/chat/completions', {
         'model': VISION_MODEL,
         'messages': [{'role': 'user', 'content': [
-            {'type': 'text', 'text': DESC_PROMPT},
+            {'type': 'text', 'text': prompt or DESC_PROMPT},
             {'type': 'image_url',
              'image_url': {'url': 'data:%s;base64,%s' % (mime, b64)}}
         ]}],
@@ -539,6 +557,58 @@ def _asr(cfg, path):
 # 入库
 # ---------------------------------------------------------------------------
 
+def _drop_src(path):
+    """删原件。只存文字，二进制的一个都不留。删不掉也不报错——下一轮还会来。"""
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except Exception:
+        return
+    _prune_dirs(os.path.dirname(path))
+
+
+def _prune_dirs(d):
+    """顺手清掉因此变空的目录（inbox/2026-11-10/qq/ 之类），别留一堆空壳。"""
+    stops = [os.path.abspath(s) for s in (QQ_INBOX, WX_INBOX, ROOT) if s]
+    while d:
+        cur = os.path.abspath(d)
+        if cur in stops or len(cur) < 5:
+            return
+        try:
+            if os.listdir(cur):
+                return
+            os.rmdir(cur)
+        except Exception:
+            return
+        d = os.path.dirname(d)
+
+
+def sweep_old_src(days=None):
+    """清掉超过 N 天还没理解掉的原件（一直失败的坏文件）。
+
+    删文件的同时不能碰 media-index.jsonl：那是 QQ 的元信息索引，本身就是
+    文字，留着不占地方，而且清单要靠它说明「这条曾经是什么」。
+    """
+    cut = time.time() - (days or KEEP_SRC_DAYS) * 86400
+    n = 0
+    for root in (QQ_INBOX, WX_INBOX):
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            for fn in files:
+                if fn == 'media-index.jsonl':
+                    continue
+                p = os.path.join(dirpath, fn)
+                try:
+                    if os.path.getmtime(p) < cut:
+                        os.remove(p)
+                        n += 1
+                except Exception:
+                    pass
+    return n
+
+
 def sha1_of(path):
     h = hashlib.sha1()
     try:
@@ -595,6 +665,8 @@ def ingest(items):
                 old['t'] = it['t']
                 old['chat'] = it['chat']
                 old['platform'] = it['platform']
+            # 重复的那份原件直接删：库里已经有它的文字了，留着纯占地方
+            _drop_src(it.get('src'))
             continue
 
         ext = os.path.splitext(p)[1].lower()
@@ -608,24 +680,17 @@ def ingest(items):
                 ext = real
         if not ext:
             ext = real or '.bin'
-        name = '%s_%s%s' % (sha[:10], _safe_name(os.path.splitext(os.path.basename(p))[0]), ext)
-        dst_dir = os.path.join(RAW, kind)
-        os.makedirs(dst_dir, exist_ok=True)
-        dst = os.path.join(dst_dir, name)
-        if not os.path.exists(dst):
-            try:
-                shutil.copy2(p, dst)
-            except Exception as e:
-                log('复制失败 %s: %s' % (p, e))
-                continue
         lib[sha] = {
             'sha': sha, 'kind': kind, 'why': why, 'ext': ext,
-            'file': os.path.relpath(dst, LIB).replace('\\', '/'),
+            # 只存文字：原件**不复制**，留个源路径给 understand 用完就删
+            'src': p,
             'size': size, 't': it['t'], 'platform': it['platform'],
             'chat': it['chat'], 'chat_id': it['chat_id'],
             'name': it['name'], 'mid': it['mid'],
             # 微信截图专用：原消息是什么类型（语音条/图片/视频…的截图）
             'msgkind': it.get('msgkind') or '',
+            # 是不是气泡截图而不是原件——决定送视觉模型时用哪个 prompt
+            'shot': bool(it.get('shot')),
             'users': [src],
             'desc': '', 'tags': [], 'text': '', 'note': ''
         }
@@ -634,11 +699,24 @@ def ingest(items):
     return lib
 
 
+def _src_of(it):
+    """原件的当前路径。新条目在 src（临时），旧条目在 library/raw 下。"""
+    s = it.get('src')
+    if s and os.path.exists(s):
+        return s
+    f = it.get('file')
+    if f:
+        p = os.path.join(LIB, f)
+        if os.path.exists(p):
+            return p
+    return ''
+
+
 def understand(lib, cache, cfg, budget, use_llm=True):
     """给还没理解过的素材做理解。返回本次实际理解的数量。
 
-    use_llm=False 只跳过要花钱的视觉/语音，**文件正文照抽**——
-    解压和读 XML 不花钱，没理由跟着一起关掉。
+    只存文字：每条理解成功后就地删掉原件（见 _drop_src），库里只剩描述/
+    转写/正文。理解失败的留原件等重试，超龄由 sweep_old_src 收尾。
     """
     done = 0
     for sha in sorted(lib.keys(), key=lambda s: -lib[s]['t']):
@@ -649,41 +727,70 @@ def understand(lib, cache, cfg, budget, use_llm=True):
             it['tags'] = c.get('tags', []) or []
             it['text'] = c.get('text', '')
             it['note'] = c.get('note', '')
-            continue
+            # 成功过的（没有 failAt）永远复用；**失败过的要退避**：入库 cron
+            # 已经改成每分钟一次，不退避的话一张坏图会变成每分钟一次无效请求。
+            left = FAIL_BACKOFF - (time.time() - (c.get('failAt') or 0))
+            if not c.get('failAt') or left > 0:
+                # 已经理解过的内容又被转发了：库里早有文字，新原件不必留
+                _drop_src(it.get('src'))
+                continue
+        p = _src_of(it)
         if it['kind'] in ('image', 'sticker'):
             if not use_llm or done >= budget:
                 continue
+            if not p:
+                it['note'] = '原件已清理，无法再理解'
+                continue
             # 太小的图模型直接拒（400），先自己判掉并写进缓存，
             # 否则每轮都当成「失败」重试，白烧时间和日志。
-            w, h = image_size(os.path.join(LIB, it['file']))
+            w, h = image_size(p)
             if w and h and (w < MIN_VISION_SIDE or h < MIN_VISION_SIDE):
                 it['note'] = '图太小（%dx%d），不做视觉理解' % (w, h)
                 cache[sha] = {'desc': '', 'tags': [], 'text': '', 'note': it['note']}
+                _drop_src(it.get('src'))
                 continue
-            desc, tags = _vision_raw(cfg, os.path.join(LIB, it['file']))
+            desc, tags = _vision_raw(cfg, p,
+                                     SHOT_PROMPT if it.get('shot') else None)
             if desc:
                 it['desc'], it['tags'] = desc, tags
                 cache[sha] = {'desc': desc, 'tags': tags, 'text': '', 'note': ''}
+                _drop_src(it.get('src'))
                 done += 1
             else:
-                it['note'] = '视觉理解失败，下一轮重试'
+                it['note'] = '视觉理解失败，稍后重试'
+                cache[sha] = {'desc': '', 'tags': [], 'text': '',
+                              'note': it['note'], 'failAt': time.time()}
         elif it['kind'] == 'voice':
             if not use_llm or done >= budget:
                 continue
-            txt = _asr(cfg, os.path.join(LIB, it['file']))
+            if not p:
+                it['note'] = '原件已清理，无法再转写'
+                continue
+            txt = _asr(cfg, p)
             if txt:
                 it['text'] = txt
                 cache[sha] = {'desc': '', 'tags': [], 'text': txt, 'note': ''}
+                _drop_src(it.get('src'))
                 done += 1
             else:
-                it['note'] = '语音转写失败，下一轮重试'
+                it['note'] = '语音转写失败，稍后重试'
+                cache[sha] = {'desc': '', 'tags': [], 'text': '',
+                              'note': it['note'], 'failAt': time.time()}
         elif it['kind'] == 'file':
             # 文件抽正文不花钱，不受 budget 限制
-            txt, note = file_text(os.path.join(LIB, it['file']), it['ext'])
+            if not p:
+                it['note'] = '原件已清理，无法再抽正文'
+                continue
+            txt, note = file_text(p, it['ext'])
             it['text'], it['note'] = txt, note
             cache[sha] = {'desc': '', 'tags': [], 'text': txt, 'note': note}
+            _drop_src(it.get('src'))
         elif it['kind'] == 'video':
-            it['note'] = '服务器无 ffmpeg，只保存原文件与大小'
+            # 服务器没有 ffmpeg，视频只能记元信息；原件直接删，只留这一行
+            it['note'] = '服务器无 ffmpeg，只记时长/大小，不留原件'
+            cache[sha] = {'desc': '', 'tags': [], 'text': '',
+                          'note': it['note']}
+            _drop_src(it.get('src'))
     return done
 
 
@@ -702,8 +809,8 @@ def render_md(lib):
                 ' · '.join('%s %d' % (KIND_LABEL.get(k, k), len(by_kind.get(k, [])))
                            for k in KIND_ORDER if by_kind.get(k))),
             '',
-            '> 图片与表情包为原文件，语音附转写，文件附正文摘要。'
-            '同一份内容被转发多次只存一份，来源记在「来源」里。',
+            '> **只存文字**：图片/表情只留一句描述，语音只留转写，文件只留正文摘要，'
+            '原件理解完即删。同一份内容被转发多次只存一份，来源记在「来源」里。',
             '',
             '## 目录', '']
     for k in KIND_ORDER:
@@ -724,9 +831,6 @@ def render_md(lib):
             title = re.sub(r'\s+', ' ', title)[:60]
             lines.append('### %s' % re.sub(r'\s+', ' ', title))
             lines.append('')
-            if k in ('image', 'sticker'):
-                lines.append('![](%s)' % it['file'])
-                lines.append('')
             if it.get('tags'):
                 lines.append('- 标签：%s' % '、'.join(it['tags']))
             if it.get('text'):
@@ -743,7 +847,7 @@ def render_md(lib):
                 extra = '、'.join('%s/%s' % (u['platform'], u['chat'] or '?')
                                   for u in it['users'][1:6])
                 lines.append('- 另被 %s 转发过' % extra)
-            lines.append('- 文件：`%s`（%s）' % (it['file'], _human(it['size'])))
+            lines.append('- 大小：%s（原件已清理）' % _human(it['size']))
             lines.append('')
     return '\n'.join(lines) + '\n'
 
@@ -760,7 +864,11 @@ def save(lib, cache):
     tmp = LIB_FILE + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         for it in sorted(lib.values(), key=lambda x: (x['kind'], -x['t'])):
-            f.write(json.dumps(it, ensure_ascii=False) + '\n')
+            # src 是「这一轮还没删的临时原件路径」，落盘没意义（下次读回来
+            # 文件已经不在了），还会让库文件里留一堆失效路径。
+            row = dict(it)
+            row.pop('src', None)
+            f.write(json.dumps(row, ensure_ascii=False) + '\n')
     os.replace(tmp, LIB_FILE)
     tmp = DESC_FILE + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
@@ -794,7 +902,17 @@ def main():
 
     qq = collect_qq()
     wx = collect_wx()
-    log('候选：QQ %d 个，微信 %d 个' % (len(qq), len(wx)))
+    # 超龄原件（一直理解失败的坏文件）每轮顺手清一次，别让它们永久占盘
+    swept = sweep_old_src()
+
+    # 没有候选、库也建好了就直接退出。cron 改成每分钟跑之后，这条短路让
+    # 空转的成本只剩两次目录扫描（毫秒级），新素材最多两分钟就能在面板里看到，
+    # 不必跟以前一样等整点。理解次数不受影响：understand 只处理没理解过的，
+    # 总调用量由素材数量决定，跟跑多勤无关。
+    if not qq and not wx and os.path.exists(LIB_FILE):
+        return 0
+    log('候选：QQ %d 个，微信 %d 个%s' % (len(qq), len(wx),
+                                  '，清理超龄原件 %d 个' % swept if swept else ''))
 
     # 已经理解过的素材也要带上（去重后可能这一轮没有任何候选）
     lib = {}
@@ -814,6 +932,8 @@ def main():
             for u in it['users']:
                 if u not in old['users'] and len(old['users']) < 30:
                     old['users'].append(u)
+            # 内容早就理解过了，这份新到的原件没必要留（只存文字）
+            _drop_src(it.get('src'))
         else:
             lib[sha] = it
             added += 1

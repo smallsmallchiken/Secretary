@@ -87,13 +87,19 @@ function haystack(r) {
 }
 
 function view(r) {
-  const abs = path.join(root(), String(r.file || '').replace(/\//g, path.sep));
+  // 只存文字之后，条目里没有 file 字段了（原件理解完就删）。没有 file 时
+  // 不能拿空串去 join：path.join(root(), '') 正好等于 root，existsSync 为真，
+  // 会被当成「本地有这个文件」，点开是一张打不开的目录。
+  const rel = String(r.file || '').replace(/\//g, path.sep);
+  const abs = rel ? path.join(root(), rel) : '';
   let local = false;
   let url = '';
-  try {
-    local = fs.existsSync(abs);
-  } catch {
-    local = false;
+  if (abs) {
+    try {
+      local = fs.existsSync(abs);
+    } catch {
+      local = false;
+    }
   }
   if (local) url = pathToFileURL(abs).href;
   return {

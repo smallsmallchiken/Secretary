@@ -79,6 +79,31 @@ function idOf(text, day) {
   return 'm_' + crypto.createHash('sha1').update(day + '|' + text).digest('hex').slice(0, 12);
 }
 
+/** 原话归一化：清单里每条待办的原话后面会带 `（n29）` 这种消息序号，
+ *  而序号是每次重跑清单时按顺序重排的 —— 同一个消息昨天是 n29 今天可能是
+ *  n31，直接拿原话当键会对不上，待办就重复了。这里把序号、空白、句末标点
+ *  都抹掉，只留下「那句话本身」。
+ */
+function normQuote(s) {
+  return String(s || '')
+    .replace(/[（(]\s*n\d+\s*[)）]/gi, '')
+    .replace(/\s+/g, '')
+    .replace(/[。！？，、；：.!?,;:]+$/g, '')
+    .slice(0, 40);
+}
+
+/** 待办的「来源消息」指纹，用来跨版本对齐同一条待办。
+ *
+ *  id 是按待办**文案**算的，而文案是模型每次重跑清单一句话重新概括的：
+ *  「对方发来文件称…」和「确认对方发来的文件…」是同一个来源消息，id 却不同，
+ *  于是每重跑一次清单就多出一条重复待办（真实发生过：一条消息裂成四条）。
+ *  来源消息（哪天 + 哪个会话 + 几点 + 原话）才是稳定的，用它对齐。
+ */
+function srcKeyOf(t, day) {
+  const raw = [day, t.chat || '', t.hm || '', normQuote(t.quote || t.text)].join('|');
+  return 'k_' + crypto.createHash('sha1').update(raw).digest('hex').slice(0, 12);
+}
+
 /* ------------------------------------------------------------------ */
 /* 从每日清单抽待办                                                     */
 /* ------------------------------------------------------------------ */
@@ -152,6 +177,13 @@ function parseDaily(md, day) {
 function syncFromDaily() {
   const d = load();
   const seen = new Set(d.items.map((x) => x.id));
+  // 老条目没有 key 字段，用同一条规则就地补算，历史数据也能对上
+  const byKey = new Map();
+  for (const it of d.items) {
+    const k = it.key || srcKeyOf(it, it.day);
+    it.key = k;
+    byKey.set(k, it);
+  }
   let added = 0;
   const days = dailyDays();
   for (const day of days) {
@@ -162,11 +194,23 @@ function syncFromDaily() {
       continue;
     }
     for (const t of parseDaily(md, day)) {
+      const key = srcKeyOf(t, day);
+      const old = byKey.get(key);
+      if (old) {
+        // 同一条来源消息又出现在新一版清单里：只更新措辞，**不动勾选状态**。
+        // 已经做完的事不该因为模型换了句话就变回未完成。
+        if (!old.done && t.text && t.text !== old.text) {
+          old.text = t.text;
+          old.quote = t.quote || old.quote;
+        }
+        continue;
+      }
       const id = idOf(t.text, day);
       if (seen.has(id)) continue;
       seen.add(id);
-      d.items.push({
+      const item = {
         id,
+        key,
         text: t.text,
         quote: t.quote,
         chat: t.chat,
@@ -176,7 +220,9 @@ function syncFromDaily() {
         done: false,
         doneAt: 0,
         created: Math.floor(Date.now() / 1000)
-      });
+      };
+      d.items.push(item);
+      byKey.set(key, item);
       added += 1;
     }
   }
