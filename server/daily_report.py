@@ -222,7 +222,11 @@ def attach_media(msgs, index, lib=None):
         m['files'] = []
         rows = []
         if m['shot']:
-            rows.append({'type': '', 'label': '截图'})
+            # 只看归档字段会挂一堆空壳：微信截图的原件被素材库理解完就删了
+            # （用户要求只存文字、省内存），`shot` 里留的是悬空路径，清单里
+            # 就出现「截图（素材库还没理解出来）」这种什么都没说明的行。
+            if os.path.exists(os.path.join(WX_INBOX, m['shot'])):
+                rows.append({'type': '', 'label': '截图'})
         for r in by_mid.get((plat, str(m['mid'])), []):
             rows.append({'type': r.get('type') or '',
                          'label': KIND_LABEL.get(r.get('type'), r.get('type') or '媒体')})

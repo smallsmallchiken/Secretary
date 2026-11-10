@@ -92,8 +92,11 @@ def main():
                 if not name.endswith(".jsonl"):
                     continue
                 local = os.path.join(local_dir, name)
-                # 增量：本地已有且不小于远端就跳过（归档只追加，文件只会变大）
-                if not args.force and os.path.exists(local) and os.path.getsize(local) >= ent.st_size:
+                # 增量：本地和远端一样大就跳过。
+                # **不能写「本地不小于远端就跳过」**：归档被清理重写过之后
+                # 远端会变小，本地那份是旧的脏数据，按 >= 判断会永远跳过，
+                # 桌面上就一直是清洗前的样子（实测过）。
+                if not args.force and os.path.exists(local) and os.path.getsize(local) == ent.st_size:
                     skipped += 1
                     continue
                 # 远端路径必须用 posixpath 拼：在 Windows 上 os.path.join 会拼出反斜杠，

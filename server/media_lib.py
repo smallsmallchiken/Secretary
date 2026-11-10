@@ -46,7 +46,10 @@ TZ_OFF = 8 * 3600
 ROOT = os.environ.get('MEDIA_ROOT', '/opt/secretary/.data')
 QQ_INBOX = os.environ.get('MEDIA_QQ_INBOX', os.path.join(ROOT, 'inbox'))
 WX_INBOX = os.environ.get('MEDIA_WX_INBOX', '/opt/linux-im/inbox')
-WX_ARCHIVE = os.environ.get('MEDIA_WX_ARCHIVE', os.path.join(ROOT, 'archive', 'wechat'))
+WX_ARCHIVE = os.environ.get('MEDIA_WX_ARCHIVE', '/opt/linux-im/archive')
+# 注意：这里必须指**容器原件**（/opt/linux-im/archive），不是
+# /opt/secretary/.data/archive/wechat。后者是宿主机 cron 每分钟按字节偏移
+# 增量同步出来的副本，只读快照；往那儿写回填，下一分钟就被原件覆盖掉了。
 CONFIG = os.environ.get('MEDIA_CONFIG', os.path.join(ROOT, 'config.json'))
 # 收到的东西放 media/received/，和「发出去用的」表情包库 media/pics/ 平级分开：
 # 两边用途不同（一个是被动存档+理解，一个是主动挑选发送），混在一个目录会互相干扰。
@@ -568,6 +571,64 @@ def _drop_src(path):
     _prune_dirs(os.path.dirname(path))
 
 
+def backfill_wx_archive(lib, days=3):
+    """把微信截图的理解结果写回归档正文。
+
+    微信 4.1.26 拿不到原始文件：语音条、图片、视频、文件都只有一张气泡截图。
+    截图理解完原件就删了（用户要求只存文字、省内存），所以**描述必须在删之前
+    回到归档那一行**，否则这条消息永远只剩一个 `[语音条]`，等于白收——清单里
+    就会出现「[语音条]（截图（素材库还没理解出来））」这种空壳行。
+
+    对齐靠 `mid`：微信的 mid 是气泡图指纹，归档行和库条目存的都是它。
+    已经有正文的行不覆盖（文字消息的正文是 OCR 出来的，比视觉描述准）。
+    """
+    if not os.path.isdir(WX_ARCHIVE):
+        return 0
+    need = {}
+    for it in lib.values():
+        if it.get('platform') != '微信' or not it.get('shot'):
+            continue
+        desc = (it.get('desc') or it.get('text') or '').strip()
+        if desc and it.get('mid'):
+            need[str(it['mid'])] = desc
+    if not need:
+        return 0
+    today = bj_day()
+    stamps = set()
+    for d in range(days):
+        stamps.add('wx-%s.jsonl' % bj_day(time.time() - d * 86400))
+    n = 0
+    for name in sorted(os.listdir(WX_ARCHIVE)):
+        if name not in stamps and not name.endswith('.jsonl'):
+            continue
+        if not name.endswith('.jsonl'):
+            continue
+        p = os.path.join(WX_ARCHIVE, name)
+        rows = read_jsonl(p)
+        changed = False
+        for r in rows:
+            desc = need.get(str(r.get('mid') or ''))
+            if not desc:
+                continue
+            cur = (r.get('x') or '').strip()
+            if cur and not cur.startswith('['):
+                continue                    # 已有真实正文，别用描述盖掉
+            if cur == desc:
+                continue
+            r['x'] = desc
+            r['shot'] = ''                  # 原件已删，路径留着只会让清单挂个空图
+            changed = True
+            n += 1
+        if changed:
+            tmp = p + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                for r in rows:
+                    f.write(json.dumps(r, ensure_ascii=False) + '\n')
+            os.replace(tmp, p)
+    log('回填微信归档正文 %d 条' % n)
+    return n
+
+
 def _prune_dirs(d):
     """顺手清掉因此变空的目录（inbox/2026-11-10/qq/ 之类），别留一堆空壳。"""
     stops = [os.path.abspath(s) for s in (QQ_INBOX, WX_INBOX, ROOT) if s]
@@ -905,15 +966,6 @@ def main():
     # 超龄原件（一直理解失败的坏文件）每轮顺手清一次，别让它们永久占盘
     swept = sweep_old_src()
 
-    # 没有候选、库也建好了就直接退出。cron 改成每分钟跑之后，这条短路让
-    # 空转的成本只剩两次目录扫描（毫秒级），新素材最多两分钟就能在面板里看到，
-    # 不必跟以前一样等整点。理解次数不受影响：understand 只处理没理解过的，
-    # 总调用量由素材数量决定，跟跑多勤无关。
-    if not qq and not wx and os.path.exists(LIB_FILE):
-        return 0
-    log('候选：QQ %d 个，微信 %d 个%s' % (len(qq), len(wx),
-                                  '，清理超龄原件 %d 个' % swept if swept else ''))
-
     # 已经理解过的素材也要带上（去重后可能这一轮没有任何候选）
     lib = {}
     if os.path.exists(LIB_FILE):
@@ -922,6 +974,23 @@ def main():
             if sha:
                 r.setdefault('users', [])
                 lib[sha] = r
+
+    # 回填要放在**短路之前**：上一轮理解完的微信截图，原件可能已经被清掉，
+    # 而描述还没进归档。库是刚读出来的内存对象，没有待回填条目时这一步
+    # 连一个文件都不读（`need` 为空立刻返回），空转成本可忽略。
+    try:
+        backfill_wx_archive(lib)
+    except Exception as e:
+        log('回填微信归档失败：%s' % e)
+
+    # 没有候选、库也建好了就直接退出。cron 改成每分钟跑之后，这条短路让
+    # 空转的成本只剩两次目录扫描（毫秒级），新素材最多两分钟就能在面板里看到，
+    # 不必跟以前一样等整点。理解次数不受影响：understand 只处理没理解过的，
+    # 总调用量由素材数量决定，跟跑多勤无关。
+    if not qq and not wx and os.path.exists(LIB_FILE):
+        return 0
+    log('候选：QQ %d 个，微信 %d 个%s' % (len(qq), len(wx),
+                                  '，清理超龄原件 %d 个' % swept if swept else ''))
 
     new = ingest(qq + wx)
     added = 0
@@ -941,6 +1010,12 @@ def main():
 
     got = understand(lib, cache, cfg, limit, use_llm)
     log('本次理解 %d 个%s' % (got, '' if use_llm else '（--no-llm，只抽了文件正文）'))
+
+    # 理解完立刻回填归档：截图原件马上要被 sweep 清掉，描述不回填就永久丢失。
+    try:
+        backfill_wx_archive(lib)
+    except Exception as e:
+        log('回填微信归档失败：%s' % e)
 
     save(lib, cache)
     counts = {}
