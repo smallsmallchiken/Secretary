@@ -16,7 +16,7 @@
 依赖：xdotool xclip import(ImageMagick) tesseract-ocr-chi-sim python3-pil python3-requests
 配置：/tmp/wx_agent_cfg.json   状态：/tmp/wx_agent_state.json   日志：stdout
 """
-import json, os, re, subprocess, time, hashlib, sys, random, difflib
+import json, os, re, subprocess, time, hashlib, sys, random, difflib, calendar, threading
 import ctypes
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
@@ -81,7 +81,14 @@ DEFAULT_CFG = {
             '对方：哈哈哈哈笑死\n你：啥事这么好笑\n'
         ),
     },
-    'history': {}                # 会话名 -> 最近消息文本（上下文）
+    'history': {},               # 会话名 -> 最近消息文本（上下文）
+    # 精致识别：OCR 读脏/长文交给视觉模型复核后回填归档。
+    # vlFix 关掉就退回「只靠 tesseract」；vlBudget 是每天最多复核多少条。
+    'observe': {
+        'vlFix': True,
+        'vlBudget': 150,
+        'vlModel': 'Qwen/Qwen3-VL-8B-Instruct',
+    },
 }
 
 # 配置与状态优先放 /data（宿主机 /opt/linux-im 的挂载点），容器重建也不丢；
@@ -106,8 +113,12 @@ def load_cfg():
             # 默认的 persona 整个抹掉，llm_reply 立刻 KeyError。踩过。
             llm = dict(cfg.get('llm') or {})
             llm.update(user.get('llm') or {})
+            # observe 同理：只写了一个 vlBudget 不能把 vlFix/vlModel 抹掉
+            ob = dict(cfg.get('observe') or {})
+            ob.update(user.get('observe') or {})
             cfg.update(user)
             cfg['llm'] = llm
+            cfg['observe'] = ob
         except Exception as e:
             log('cfg load fail: %s' % e)
     return cfg
@@ -207,6 +218,9 @@ def _arc_read(day):
     return rows
 
 
+_ARC_LOCK = threading.Lock()
+
+
 def arc_append(session, text, me=False, kind='text', ts=None, extra=None):
     """记一条。失败一律吞掉——归档绝对不能影响收发主链路。
 
@@ -228,18 +242,96 @@ def arc_append(session, text, me=False, kind='text', ts=None, extra=None):
     path = _arc_path(_day_of(ts))
     try:
         os.makedirs(ARCHIVE_DIR, exist_ok=True)
-        with open(path, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + '\n')
-        # 顺手把刚写的这一行接进缓存，省掉下一次整文件重解析
-        hit = _arc_cache.get(path)
-        if hit:
-            hit[1].append(rec)
-            st = os.stat(path)
-            _arc_cache[path] = ((st.st_size, st.st_mtime), hit[1])
+        with _ARC_LOCK:
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+            # 顺手把刚写的这一行接进缓存，省掉下一次整文件重解析
+            hit = _arc_cache.get(path)
+            if hit:
+                hit[1].append(rec)
+                st = os.stat(path)
+                _arc_cache[path] = ((st.st_size, st.st_mtime), hit[1])
         return True
     except Exception as e:
         log('archive append fail: %s' % e)
         return False
+
+
+def _near_dup(title, text, ts, window=12 * 3600):
+    """这条是不是「刚归档过的同一句话」的又一次读数。
+
+    `_dedup_keys` 是精确键（图指纹 + 正文指纹），挡不住 OCR 抖动：同一屏消息
+    被重新读一遍时，`-科目，英语` 会变成 `-科目英语`，指纹全变 → 当成新消息
+    再记一条。agent 每次重启都会把屏幕上的旧消息重读一遍，归档里于是出现
+    「13:34 一条、15:33 又一条」的孪生记录（今天 15:33 就发生了一次）。
+
+    这里按会话 + 12 小时窗口做近似比对（归一后相似度 ≥0.90 视为同一条），
+    只在这个会话的最近 300 行里比，代价是每条新消息几毫秒。
+    """
+    a = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', text or '').lower()
+    if len(a) < 6:
+        return False
+    rows = _arc_read(_day_of(ts))[-300:]
+    for r in reversed(rows):
+        if r.get('id') != title or r.get('me'):
+            continue
+        if ts - int(r.get('t') or 0) > window:
+            continue
+        b = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', r.get('x') or '').lower()
+        if not b:
+            continue
+        if a == b:
+            return True
+        if abs(len(a) - len(b)) <= max(4, len(a) // 5) and \
+                difflib.SequenceMatcher(None, a, b).ratio() >= 0.90:
+            return True
+    return False
+
+
+def arc_update_text(day, mid, text):
+    """把某条归档的正文换掉（视觉复核用）。按 `mid`（气泡指纹）定位。
+
+    监听是往文件尾部追加的；这里要改中间一行，只能整份重写。文件一天几百行，
+    重写代价可忽略，但要加锁——复核线程写的同时主循环可能正在 append，
+    两者交错的后果是丢消息，比慢几十毫秒严重得多。
+    """
+    if not day or not mid or not text:
+        return False
+    path = _arc_path(day)
+    with _ARC_LOCK:
+        try:
+            with open(path, encoding='utf-8') as f:
+                raw = f.readlines()
+        except OSError:
+            return False
+        hit = False
+        out = []
+        for line in raw:
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                r = json.loads(s)
+            except Exception:
+                out.append(s + '\n')
+                continue
+            if not hit and str(r.get('mid') or '') == str(mid):
+                r['x'] = text[:1000]
+                r['fix'] = 'vl'
+                hit = True
+            out.append(json.dumps(r, ensure_ascii=False) + '\n')
+        if not hit:
+            return False
+        try:
+            tmp = path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.writelines(out)
+            os.replace(tmp, path)
+            _arc_cache.pop(path, None)
+        except Exception as e:
+            log('archive update fail: %s' % e)
+            return False
+    return True
 
 
 def arc_incoming(session, text):
@@ -2176,6 +2268,321 @@ def _band_fingerprint(crop):
         return ''
 
 
+# ---------- 精致识别：真实时间戳 / 低质复核 / 昵称收敛 ----------
+
+_HHMM_RE = re.compile(r'(\d{1,2})\s*[:：]\s*(\d{2})')
+_MD_RE = re.compile(r'(?:(\d{4})\s*[年/-]\s*)?(\d{1,2})\s*[月/-]\s*(\d{1,2})\s*日?')
+_WEEK_CN = {'一': 0, '二': 1, '三': 2, '四': 3, '五': 4, '六': 5, '日': 6, '天': 6}
+
+
+def _bj_epoch(y, mo, d, hh, mi, now=None):
+    """北京时间的日历时间 → epoch。不依赖容器时区（容器可能是 UTC）。"""
+    try:
+        return int(calendar.timegm((y, mo, d, hh, mi, 0, 0, 0, 0))) - TZ_OFF
+    except Exception:
+        return None
+
+
+def _parse_time_mark(s, now=None):
+    """把时间分隔行的文字解析成 epoch。认不出来返回 None。
+
+    微信的时间行有四种写法，全都见过：
+      `13:34`（当天）  `昨天 09:12`  `星期三 15:20`（一周内）  `11月6日 13:34`
+    """
+    now = now or time.time()
+    t = re.sub(r'\s+', '', s or '')
+    if not t:
+        return None
+    g = time.gmtime(now + TZ_OFF)
+    y, mo, d = g.tm_year, g.tm_mon, g.tm_mday
+    hm = _HHMM_RE.search(t)
+    if not hm:
+        return None
+    hh, mi = int(hm.group(1)), int(hm.group(2))
+    if hh > 23 or mi > 59:
+        return None
+    if '前天' in t:
+        ts = _bj_epoch(y, mo, d, hh, mi) - 2 * 86400
+    elif '昨天' in t:
+        ts = _bj_epoch(y, mo, d, hh, mi) - 86400
+    elif '星期' in t or re.search(r'周[一二三四五六日天]', t):
+        ch = (re.search(r'星期([一二三四五六日天])', t) or
+              re.search(r'周([一二三四五六日天])', t)).group(1)
+        want = _WEEK_CN[ch]
+        back = (g.tm_wday - want) % 7 or 7          # 「星期三」不会是今天
+        ts = _bj_epoch(y, mo, d, hh, mi) - back * 86400
+    else:
+        md = _MD_RE.search(t)
+        if md:
+            my = int(md.group(1) or y)
+            ts = _bj_epoch(my, int(md.group(2)), int(md.group(3)), hh, mi)
+            if ts and ts > now + 86400:             # 跨年：12月31日 读成今年
+                ts = _bj_epoch(my - 1, int(md.group(2)), int(md.group(3)), hh, mi)
+        else:
+            ts = _bj_epoch(y, mo, d, hh, mi)
+            if ts and ts > now + 600:               # 显示的是「昨天 23:50」这种
+                ts -= 86400
+    if not ts:
+        return None
+    # 离谱的一律丢掉：屏幕上一屏最多留一周的消息，未来时间一定是读错了。
+    # 不能只给 3 天：今天是周二时，「星期三 15:20」指的就是 6 天前，
+    # 「11月6日」在今天（11-10）也是 4 天前——卡 3 天会把它们全丢掉。
+    if ts > now + 600 or now - ts > 8 * 86400:
+        return None
+    return ts
+
+
+def _time_marks(im, win, bands):
+    """在气泡带之间的空隙里找「时间分隔行」，读成真实发送时间。
+
+    监听模式原来只能记「第一次看到这条消息的时刻」，一屏批量入库的消息于是
+    全是同一个时间（清单里整批 13:34），先后和跨天都看不出来。微信聊天区里
+    每隔一段就插一行居中的浅灰时间（`13:34` / `昨天 09:12` / `星期三 15:20`），
+    这是屏幕上唯一能拿到**真实时间**的地方。
+
+    检测不靠整块 OCR（会把正文也喂进去，既慢又容易把正文当时间读）：
+    时间行的形态很硬——只在中间有浅灰像素、左右两侧大段空白。按行扫空隙，
+    命中连续几行才裁出来小图跑一次 psm7。一屏通常只有 1~3 处，代价可忽略。
+    返回 [(y, ts)]，按 y 升序。
+    """
+    x, y, w, h = win
+    cx0 = x + int(w * 0.36)
+    cx1 = min(x + w - 20, im.width)
+    if cx1 - cx0 < 120:
+        return []
+    inner0 = cx0 + int((cx1 - cx0) * 0.28)      # 只看中间 44%
+    inner1 = cx0 + int((cx1 - cx0) * 0.72)
+    gaps = []
+    prev = y + int(h * MSG_Y0)
+    for b in bands:
+        if b['y0'] - prev >= 10:
+            gaps.append((prev, b['y0'] - 2))
+        prev = max(prev, b['y1'] + 2)
+    bottom = y + int(h * MSG_Y1)
+    if bottom - prev >= 10:
+        gaps.append((prev, bottom))
+    if not gaps:
+        return []
+
+    px = im.load()
+    out = []
+    for gy0, gy1 in gaps:
+        gy1 = min(gy1, im.height - 1)
+        if gy1 - gy0 < 8:
+            continue
+        rows = []
+        for yy in range(gy0, gy1 + 1):
+            mid = side = 0
+            for xx in range(inner0, inner1, 2):
+                v = px[xx, yy]
+                g = (v[0] * 299 + v[1] * 587 + v[2] * 114) // 1000
+                if 120 <= g <= 215:
+                    mid += 1
+            for xx in list(range(cx0, inner0, 3)) + list(range(inner1, cx1, 3)):
+                v = px[xx, yy]
+                g = (v[0] * 299 + v[1] * 587 + v[2] * 114) // 1000
+                if g < 215:
+                    side += 1
+            rows.append(mid >= 3 and side <= 2)
+        run = []
+        for i, ok in enumerate(rows):
+            if ok:
+                run.append(i)
+                continue
+            if len(run) >= 6:
+                break
+            run = []
+        if len(run) < 6:
+            continue
+        ty0 = gy0 + run[0] - 3
+        ty1 = gy0 + run[-1] + 4
+        try:
+            crop = im.crop((cx0, max(ty0, 0), cx1, min(ty1, im.height)))
+            txt = ocr_img(_prep(crop, 2, 210), psm=7, lang='chi_sim+eng')
+        except Exception:
+            continue
+        ts = _parse_time_mark(txt)
+        if ts:
+            out.append((gy0 + run[-1], ts))
+    out.sort()
+    return out
+
+
+def _text_quality(t):
+    """OCR 结果的「像人话程度」，0~1。用来决定要不要复核、复核结果要不要采纳。
+
+    扣分项都是 tesseract 认错字形的固定产物：
+      - 括号引号残骸（`«=: ”`）、孤立符号；
+      - 成串大写拉丁（`REGS` `RAK`）——中文句子里不该出现；
+      - 短的无中文碎片（`t0-x0 oe o`）：气泡边缘、头像、时间戳被读进来的痕迹。
+    纯中文/数字/小写字母不扣分，所以「okok」「120km」这种正常短消息不会误伤。
+    """
+    raw = t or ''
+    s = re.sub(r'\s+', '', raw)
+    if not s:
+        return 0.0
+    cn = sum(1 for ch in s if '\u4e00' <= ch <= '\u9fa5')
+    # 中文标点算「正常字符」：视觉复核的输出常带全角冒号分号，不算它是可疑，
+    # 否则「整理得很整齐的转写」反而比 OCR 的乱码分低，复核结果永远采纳不了。
+    ok = sum(1 for ch in s if ('\u4e00' <= ch <= '\u9fa5') or ch.isdigit()
+             or ('a' <= ch <= 'z') or ('A' <= ch <= 'Z')
+             or ch in '，。！？、；：（）《》【】『』“”‘’…—～·@#%&=')
+    junk = sum(1 for ch in s if ch in '][«»|~^`\\/"\'*+<>{}')
+    up = len(re.findall(r'[A-Z]{2,}', s))
+    frag = sum(1 for tok in raw.split()
+               if len(tok) <= 4 and not re.search(r'[\u4e00-\u9fa5]', tok))
+    q = ok / float(len(s))
+    q -= junk / float(len(s)) * 0.9
+    q -= min(0.24, up * 0.06)
+    q -= min(0.28, frag * 0.05)
+    if cn == 0 and len(s) >= 6:
+        q -= 0.15                                     # 长句里一个汉字都没有 = 可疑
+    return max(0.0, min(1.0, q))
+
+
+VL_MODEL = 'Qwen/Qwen3-VL-8B-Instruct'
+
+TRANSCRIBE_PROMPT = (
+    '这是一条微信聊天气泡的截图。把气泡里的文字**逐字转写**出来，'
+    '保留原来的换行和标点，数字、编号、地址照抄，不要改写措辞。\n'
+    '不要描述画面，不要解释，不要补全，不要翻译，不要添加原文没有的内容。'
+    '实在认不出的字用 □ 占位。只输出转写结果，不要任何前后缀。'
+)
+
+_VL_LOCK = threading.Lock()
+_VL_QUEUE = []                 # [(cfg, day, mid, crop, old_text)]
+_VL_THREAD = [None]
+_VL_COUNT = {'day': '', 'n': 0}
+_CFG_BOX = [{}]                # 主循环每轮刷新的配置（复核线程要 apiKey）
+
+
+def _vl_cfg(cfg):
+    ob = (cfg or {}).get('observe') or {}
+    return bool(ob.get('vlFix', True)), int(ob.get('vlBudget', 120) or 0)
+
+
+def _vl_transcribe(cfg, crop):
+    """把气泡截图交给视觉模型逐字转写。返回文本（失败返回 ''）。
+
+    用 **Qwen3-VL-8B**，不是 32B：实测同一条气泡 8B 只要 1.4~9s，32B 要 12s，
+    而读数一样准（甚至更好，`Rial` 这种被 tesseract 认错的词它读回「时间」）。
+    PaddleOCR-VL 试过，60s 直接超时，不适合在线复核。
+    """
+    llm = (cfg or {}).get('llm') or {}
+    key = llm.get('apiKey') or ''
+    if not key:
+        return ''
+    model = ((cfg or {}).get('observe') or {}).get('vlModel') or VL_MODEL
+    try:
+        import base64
+        import io
+        import requests
+        buf = io.BytesIO()
+        crop.convert('RGB').save(buf, 'PNG')
+        b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+    except Exception:
+        return ''
+    body = {'model': model,
+            'messages': [{'role': 'user', 'content': [
+                {'type': 'text', 'text': TRANSCRIBE_PROMPT},
+                {'type': 'image_url',
+                 'image_url': {'url': 'data:image/png;base64,' + b64}}]}],
+            'max_tokens': 400, 'temperature': 0.0, 'stream': False}
+    try:
+        r = requests.post(llm['baseUrl'].rstrip('/') + '/chat/completions',
+                          headers={'Authorization': 'Bearer ' + key,
+                                   'Content-Type': 'application/json'},
+                          json=body, timeout=45)
+        if r.status_code != 200:
+            log('VL 复核 HTTP %s' % r.status_code)
+            return ''
+        txt = r.json()['choices'][0]['message']['content'] or ''
+    except Exception as e:
+        log('VL 复核失败：%s' % e)
+        return ''
+    txt = txt.strip().strip('`').strip()
+    txt = re.sub(r'^(?:转写|文字内容|气泡内容)[:：]\s*', '', txt)
+    if txt.count('\n') > 6:                    # 模型开始讲解就只留前几行
+        txt = '\n'.join(txt.splitlines()[:6])
+    return txt.strip()[:1000]
+
+
+def _vl_loop():
+    while True:
+        with _VL_LOCK:
+            if not _VL_QUEUE:
+                _VL_THREAD[0] = None
+                return
+            cfg, day, mid, crop, old = _VL_QUEUE.pop(0)
+        try:
+            txt = _vl_transcribe(cfg, crop)
+            if not txt:
+                continue
+            # 采纳条件：复核结果本身得像人话（≥0.5），而且不比 OCR 差多少。
+            # 不能要求「必须高 0.12」——视觉模型会顺手把「地址：xx」整理成
+            # 「『地址』：xx」，标点一多分数反而略降，卡太死就永远不采纳了。
+            # 真正的保护是「不比 OCR 明显更差」，毕竟这段文字本来就不该差。
+            if _text_quality(txt) < 0.5 or _text_quality(txt) < _text_quality(old) - 0.02:
+                continue
+            if arc_update_text(day, mid, txt):
+                log('VL 复核回填 %s: %r -> %r' % (mid, old[:24], txt[:24]))
+        except Exception as e:
+            log('VL 复核异常：%s' % e)
+        finally:
+            time.sleep(0.2)
+
+
+def _vl_enqueue(cfg, day, mid, crop, old):
+    """低质量文字气泡排进复核队列（异步，绝不阻塞监听循环）。"""
+    on, budget = _vl_cfg(cfg)
+    if not on or not mid or crop is None:
+        return False
+    today = _day_of(time.time())
+    if _VL_COUNT['day'] != today:
+        _VL_COUNT['day'], _VL_COUNT['n'] = today, 0
+    with _VL_LOCK:
+        if _VL_COUNT['n'] >= budget or len(_VL_QUEUE) > 30:
+            return False
+        _VL_COUNT['n'] += 1
+        try:
+            _VL_QUEUE.append((cfg, day, mid, crop.copy(), old))
+        except Exception:
+            return False
+        if _VL_THREAD[0] is None:
+            t = threading.Thread(target=_vl_loop)
+            t.daemon = True
+            _VL_THREAD[0] = t
+            t.start()
+    log('VL 复核入队 %s q=%.2f len=%d' % (mid, _text_quality(old), len(old)))
+    return True
+
+
+def _converge_nick(st, title, nick):
+    """群昵称收敛：OCR 每次读出来都差一两个字母，同一人被记成好几个人。
+
+    归档按 `sn` 区分说话人，`Aprill4th` / `April1l4th` / `PMHApril14th` 在
+    清单里就是三个陌生人。这里把新读到的昵称跟本会话已见昵称比对，
+    相似度 ≥0.82 就沿用已见的那个写法，名单存在 state 里（最多 12 个）。
+    """
+    if not nick:
+        return nick
+    book = st.setdefault('nicks', {}).setdefault(title, [])
+    key = re.sub(r'[^\w\u4e00-\u9fff]', '', nick).lower()
+    for old in book:
+        ok = re.sub(r'[^\w\u4e00-\u9fff]', '', old).lower()
+        if not ok:
+            continue
+        if ok == key:
+            return old
+        if abs(len(ok) - len(key)) <= 3 and \
+                difflib.SequenceMatcher(None, key, ok).ratio() >= 0.82:
+            return old
+    book.append(nick)
+    if len(book) > 12:
+        del book[0]
+    return nick
+
+
 def _obs_shot(crop, ts, title, idx, kind):
     """把这条气泡存成 PNG，返回相对 OBS_INBOX 根的路径。"""
     if crop is None:
@@ -2239,6 +2646,15 @@ def observe_chat(im, win, bands, title, st):
     sb = st.setdefault('obsSender', {})
     prev = sb.get(title) or ['', 0]
     sender = prev[0] if now - int(prev[1] or 0) < 1800 else ''
+    # 真实时间：先找屏幕上的时间分隔行（`13:34` / `昨天 09:12`），
+    # 找不到就沿用本会话上次读到的那条。6 小时以外直接作废——
+    # 那是上一轮的值，再用会把今天的消息记到早上去。
+    marks = _time_marks(im, win, bands)
+    lm = st.setdefault('obsMark', {})
+    cur_ts = int(lm.get(title) or 0)
+    if not cur_ts or now - cur_ts > 6 * 3600 or cur_ts > now + 600:
+        cur_ts = 0
+    used = 0
     for idx, b in enumerate(ins):
         # 宽裁 + 紧裁两张都给 `_band_read`：宽裁读数更全，紧裁补漏。
         crops = _obs_crops(im, win, b)
@@ -2252,11 +2668,20 @@ def observe_chat(im, win, bands, title, st):
             continue
         for k in keys:
             seen[k] = now
-        # 同一轮扫出来的一屏消息，秒级时间戳全一样，清单里排序和「几点发的」
-        # 都会乱。按气泡从上到下的顺序每条 +1 秒，顺序就对了。
-        ts = now + idx
+        # 用时间行给这条消息定真实时间；同一时间行下的多条按顺序 +1 秒。
+        mt = None
+        for my, mts in marks:
+            if my <= b['y0']:
+                mt = mts
+        if mt and mt != cur_ts:
+            cur_ts, used = mt, 0
+        ts = (cur_ts + used) if cur_ts else (now + idx)
+        used += 1
+        # OCR 抖动造成的「同一条重读一遍」不要重复入库（重启后整屏重扫是主因）
+        if _near_dup(title, text, ts):
+            continue
         if group:
-            sender = _band_sender(im, win, b, sender)
+            sender = _converge_nick(st, title, _band_sender(im, win, b, sender))
         # 文字消息不留截图：用户要的是「只存文字」，正文已经在 OCR 结果里，
         # 再存一张图纯占空间，还会把一堆「文字截图」灌进素材库（真实发生过，
         # 22 条素材全是 chat 截图）。只有读不出字的媒体才截。
@@ -2270,8 +2695,20 @@ def observe_chat(im, win, bands, title, st):
         if arc_append(title, text, me=False, kind=kind, ts=ts, extra=rec):
             added += 1
             kinds.append(_KIND_LABEL.get(kind, kind))
+            # OCR 读脏了、或者长文（公告/单子/地址这类最怕错字）就交给视觉模型
+            # 复核后回填。异步线程做，不挡轮询。
+            # 为什么长的也送：tesseract 在这类长文本上会产出「看着通顺但错字」的
+            # 结果（`Rial一周1次` 其实是「时间，一周1次」），质量分掉不下来，
+            # 只有视觉模型能纠正。8B 模型一条 1~7s，一天几十条完全扛得住。
+            if kind == 'text':
+                q = _text_quality(text)
+                long_msg = len(re.sub(r'\s+', '', text)) >= 36
+                if q < 0.78 or long_msg:
+                    _vl_enqueue(_CFG_BOX[0], _day_of(ts), fp, crop, text)
     if group and sender:
         sb[title] = [sender, now]
+    if cur_ts:
+        lm[title] = cur_ts
     if added:
         save_state(st)
         log('observe %s: +%d 条 (%s)' % (title, added, ', '.join(kinds)))
@@ -2398,6 +2835,7 @@ def main_loop():
                 if cfg.get('observeOnly'):
                     title = get_chat_title(shot2, win)
                     if title:
+                        _CFG_BOX[0] = cfg       # 复核线程要用 apiKey/baseUrl
                         observe_chat(shot2, win, bands, title, st)
                     else:
                         log('observe: title empty at y=%d, skip' % uy)
