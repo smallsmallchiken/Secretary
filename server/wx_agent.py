@@ -33,6 +33,17 @@ MEDIA = '/data/media'
 # 必须写进 ENV，ocr() 起子进程时会继承。
 ENV = dict(os.environ, DISPLAY=DISPLAY, OMP_THREAD_LIMIT='1')
 os.environ['OMP_THREAD_LIMIT'] = '1'
+# 常驻 OCR 走 ctypes，OpenMP 的线程数在 **库初始化那一刻** 就定了，事后改
+# os.environ 没用（进程内改环境变量不影响已加载的 libgomp）。所以真正管用的
+# 是 `_tess_lib()` 里的 omp_set_num_threads(1)，这里只是给 CLI 兜底路径用。
+# 踩过的坑：只设 OMP_THREAD_LIMIT 时，单次 OCR 会开满核（实测进程 170% CPU，
+# 4 个线程里 3 个都是 tesseract 的），而并发实例还会互相踩得更慢更不准。
+os.environ.update({
+    'OMP_NUM_THREADS': '1',
+    'OMP_WAIT_POLICY': 'PASSIVE',
+    'OPENBLAS_NUM_THREADS': '1',
+    'MKL_NUM_THREADS': '1',
+})
 
 # ---------- 配置 ----------
 
@@ -715,6 +726,14 @@ def _tess_lib():
             lib.TessBaseAPIGetUTF8Text.argtypes = [ctypes.c_void_p]
             lib.TessBaseAPIGetUTF8Text.restype = ctypes.c_void_p
             lib.TessDeleteText.argtypes = [ctypes.c_void_p]
+            # 把 libgomp 的并行度钉成 1。不设置的话默认开满核，一次 OCR 就
+            # 吃 1.7 核，而且同时跑两个实例会互相踩（见 open_chat 里的注释：
+            # 并行 579ms、串行 295ms，还认错字）。libgomp 同一个 so 只加载一份，
+            # 这里拿到的是 tesseract 正在用的那个实例。
+            try:
+                ctypes.CDLL('libgomp.so.1').omp_set_num_threads(1)
+            except Exception as e:
+                log('OMP 单线程设置失败（不影响识别）：%s' % e)
             _TESS_LIB = lib
             for cand in glob.glob('/usr/share/tesseract-ocr/*/tessdata'):
                 _TESS_DATA = cand
@@ -789,7 +808,8 @@ def in_whitelist(title, wl):
 # 特殊会话也排除掉——它们不会看回复，回了纯属浪费配额还可能踩风控。
 _GROUP_RE = re.compile(r'[(（]\s*\d{1,4}\s*[)）]')
 _GROUP_NAME_RE = re.compile(r'(群|群聊|团队)$')
-_SKIP_TITLES = ('微信团队', '微信支付', '服务通知', '订阅号消息', '文件传输助手', '腾讯新闻')
+_SKIP_TITLES = ('微信团队', '微信支付', '服务通知', '订阅号消息', '文件传输助手',
+                '腾讯新闻', 'ServiceNotifications', 'WeixinTeam', 'FileTransfer')
 
 
 def is_group_chat(title):
@@ -1350,6 +1370,19 @@ def _title_size(t):
     return m.group(1) if m else ''
 
 
+# 标题左边常带一个「会话类型」小图标（群/图片/链接…），OCR 会把它读成
+# 一两个符号或汉字：`图”乌鲁木齐…`、`轿 ”…`、`- `。不剥掉的话会话名会带上
+# 这个尾巴，同一个群因为图标读法不同又裂成好几个 key。
+_ICON_TAIL_RE = re.compile(r'^.{0,3}?["”』」]\s*')
+
+
+def _strip_icon_noise(t):
+    t = (t or '').strip()
+    t = _ICON_TAIL_RE.sub('', t)
+    t = re.sub(r'^[^\u4e00-\u9fa5A-Za-z0-9]{1,4}', '', t)
+    return t.strip()
+
+
 def _stable_title(t):
     """把 OCR 抖出来的标题挂回已知的那个名字。
 
@@ -1362,7 +1395,7 @@ def _stable_title(t):
          不制造新键；
       2. 短名（G / ER / DHX 这类）只认完全相同，避免「ER」和「FR」互相吞掉。
     """
-    t = (t or '').strip()
+    t = _strip_icon_noise(t)
     if not t:
         return t
     key = _title_key(t)
@@ -1407,7 +1440,12 @@ def get_chat_title(img_path, win):
     （File Transfer、英文昵称）chi_sim 认不准，这时再补一次 eng。
     """
     x, y, w, h = win
-    box = (x + 244, y + 20, max(x + 244 + 120, x + w - 140), y + 48)
+    # **y 必须是 46~68，不是 20~48**。标题栏上方是分隔线和留白，20~48 那一段
+    # 整块是空白，OCR 只能瞎猜——实测把「乌鲁木齐欣欣向荣大学生群办(237)」
+    # 读成了 `ER`，于是这个群被判成私聊，群消息全记到一个不存在的「ER」名下
+    # （清单里那些 15 条家教长文其实全是群里的）。按深色像素分布量出来的
+    # 文字行是窗口内 y+50 ~ y+64，上下各留 2px 即可。
+    box = (x + 246, y + 46, max(x + 246 + 120, x + w - 140), y + 68)
     title = re.sub(r'\s+', '', ocr_region(img_path, box, psm=7, lang='chi_sim'))
     # 第二遍（eng）只在「结果不像话」时才跑：
     #   空、或者既没有中文也没有 ASCII 字母数字 —— 那才是 chi_sim 认崩了。
@@ -2787,6 +2825,26 @@ def _dedup_keys(title, kind, text, fp):
     return keys
 
 
+def _chat_fp(im, win):
+    """聊天区整屏指纹（1/8 灰度缩略图 md5）。
+
+    监听是 0.3 秒一轮的轮询，但「屏幕上有什么」几秒才变一次。没有这个短路时，
+    只要红点没被点掉，同一屏会被整屏重扫：12 条气泡 × 宽裁+紧裁 = 十几秒
+    OCR，一轮接一轮（实测进程 170% CPU 一直下不来，日志每 24 秒刷一次
+    `unread rows ... (strip same)`）。缩到 1/8 只要几毫秒，一样能判定
+    「这屏我看过了」。
+    """
+    try:
+        x, y, w, h = win
+        box = (max(x + 352, 0), max(y + 50, 0),
+               min(x + w - 8, im.width), min(y + h - 130, im.height))
+        crop = im.crop(box).convert('L')
+        small = crop.resize((max(1, crop.width // 8), max(1, crop.height // 8)))
+        return hashlib.md5(small.tobytes()).hexdigest()
+    except Exception:
+        return ''
+
+
 def observe_chat(im, win, bands, title, st):
     """监听模式处理一个会话：把屏幕上所有对方气泡逐条归档 + 留截图。
 
@@ -2797,6 +2855,11 @@ def observe_chat(im, win, bands, title, st):
     没有它就会漏进去一批群消息。
     """
     if is_group_chat(title):
+        return 0
+    # 同一屏不重扫：这一屏的气泡上一轮已经逐条 OCR 过，重来一遍只是白烧 CPU。
+    fp = _chat_fp(im, win)
+    ofp = st.setdefault('obsFP', {})
+    if fp and ofp.get(title) == fp:
         return 0
     ins = [b for b in bands if b.get('kind') == 'in'][-OBS_MAX_BANDS:]
     if not ins:
@@ -2883,8 +2946,15 @@ def observe_chat(im, win, bands, title, st):
         sb[title] = [sender, now]
     if cur_ts:
         lm[title] = cur_ts
-    if added:
+    # 这屏处理完了，记下指纹：下一轮（0.3 秒后）直接短路，不再 OCR。
+    if fp:
+        ofp[title] = fp
+        if len(ofp) > 40:                     # 只留最近的，别让 state 无限涨
+            for k in list(ofp)[:-40]:
+                ofp.pop(k, None)
+    if added or fp:
         save_state(st)
+    if added:
         log('observe %s: +%d 条 (%s)' % (title, added, ', '.join(kinds)))
     return added
 
@@ -2987,11 +3057,20 @@ def main_loop():
             # 或者切会话时窗口没焦点），这时红点还在、又打不开，不冷却就会
             # 「每 0.15 秒重试一次」把 CPU 打满（实测 96%，日志刷几千行）。
             fails = st.setdefault('openFail', {})
+            # 群行冷却：活跃群里消息是连绵不断的，红点消掉几秒就又回来，
+            # 于是每 0.3 秒就「点开群 → 判群 → 跳过」循环一次，白白切换会话、
+            # 重绘、跑一轮标题 OCR（实测这样能吃到 130% CPU）。反正群不采，
+            # 点过一次就歇 45 秒——真换成私聊顶到这一行，最多也就晚 45 秒。
+            grows = st.setdefault('groupRow', {})
             nowts = time.time()
             for k in [k for k, v in fails.items() if v < nowts]:
                 del fails[k]            # 过期的清掉，别让 state 无限涨
+            for k in [k for k, v in grows.items() if v < nowts]:
+                del grows[k]
             for uy in unread[:max_unread]:
                 if fails.get(str(uy), 0) > nowts:
+                    continue
+                if grows.get(str(uy), 0) > nowts:
                     continue
                 t_start = time.time()
                 shot2, bands = open_chat(win, uy, strip=strip,
@@ -3009,10 +3088,16 @@ def main_loop():
                 if cfg.get('observeOnly'):
                     title = get_chat_title(shot2, win)
                     # 只收私聊：群聊连 OCR 都不做（一个群一屏几十条气泡，逐条
-                    # 裁剪 + 识别白烧 CPU，而且采了也不用）。红点在这一步已经
-                    # 被 open_chat 点掉了，之后也不会再弹出来，正好当「已忽略」。
-                    if title and is_group_chat(title):
-                        log('observe: 群聊 "%s" 不采集' % title)
+                    # 裁剪 + 识别白烧 CPU，而且采了也不用）。服务通知/文件传输
+                    # 这类系统会话同样不是「个人信息」，一起跳过。
+                    skip = should_skip_session(title, cfg) if title else None
+                    if skip:
+                        # 群：45 秒内不再点这一行（活跃群红点秒回，不冷却就会
+                        # 「点开→判群→跳过」死循环，实测 130% CPU）；
+                        # 系统会话：基本不会变，5 分钟一次就够。
+                        grows[str(uy)] = time.time() + (45 if skip == 'group' else 300)
+                        save_state(st)
+                        log('observe: "%s" 不采集（%s）' % (title, skip))
                         continue
                     if title:
                         _CFG_BOX[0] = cfg       # 复核线程要用 apiKey/baseUrl
@@ -3151,6 +3236,14 @@ def main_loop():
             time.sleep(5)
 
 if __name__ == '__main__':
+    # 诊断用：`kill -USR1 <pid>` 把所有线程的调用栈打到 stderr（/tmp/wx_agent.log）。
+    # 监听是常驻进程，CPU 突然飙到 170% 时光看日志看不出是谁在烧——栈才是答案。
+    try:
+        import faulthandler
+        import signal as _sig
+        faulthandler.register(_sig.SIGUSR1, all_threads=True, chain=False)
+    except Exception:
+        pass
     if len(sys.argv) > 1 and sys.argv[1] == 'probe':
         # 校准模式：输出窗口几何 + 各区域 OCR 结果
         win = win_geometry()
